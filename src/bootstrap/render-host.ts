@@ -1,7 +1,12 @@
 import { gzipSync } from "node:zlib";
 
+import { encodeIdleConfig } from "../box/idleConfig.ts";
+
 export interface HostBootstrapConfig {
   readonly boxUser: "dev";
+  readonly name: string;
+  readonly project: string;
+  readonly zone: string;
   readonly zfsDataDevice: string;
   readonly idleMinutes: number;
   readonly t3Port: number;
@@ -17,6 +22,8 @@ export interface HostBootstrapConfig {
 }
 
 const b64 = (value: string): string => Buffer.from(value, "utf8").toString("base64");
+const gzipB64 = (value: string): string =>
+  gzipSync(Buffer.from(value, "utf8"), { level: 9 }).toString("base64");
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 export const HOST_AGENT_PACKAGES = [
@@ -27,21 +34,22 @@ export const HOST_AGENT_PACKAGES = [
 ] as const;
 
 export const renderHostBootstrap = (config: HostBootstrapConfig): string => {
-  const idleConfig = JSON.stringify(
-    {
-      provider: { kind: "gcp" },
-      idleMinutes: config.idleMinutes,
-      t3Port: config.t3Port,
-      t3Activity: {
-        kind: "authenticated",
-        baseDir: `/home/${config.boxUser}/.t3`,
-        tokenPath: `/home/${config.boxUser}/.t3/idle-detector.token`,
-      },
-      checkIncus: true,
+  const idleConfig = encodeIdleConfig({
+    provider: {
+      kind: "gcp",
+      name: config.name,
+      project: config.project,
+      zone: config.zone,
     },
-    null,
-    2,
-  );
+    idleMinutes: config.idleMinutes,
+    t3Port: config.t3Port,
+    t3Activity: {
+      kind: "authenticated",
+      baseDir: `/home/${config.boxUser}/.t3`,
+      tokenPath: `/home/${config.boxUser}/.t3/idle-detector.token`,
+    },
+    checkIncus: true,
+  });
 
   return String.raw`#!/usr/bin/env bash
 set -euo pipefail
@@ -417,12 +425,8 @@ phase_t3_idle_token() {
 
 phase_cloudbox_tools() {
   install -d -m 755 /opt/cloudbox /etc/cloudbox /var/lib/cloudbox
-  npm install --prefix /opt/cloudbox --omit=dev \
-    effect@4.0.0-rc.112 \
-    @effect/platform-node@4.0.0-rc.112 \
-    @aws-sdk/client-ec2@3.1120.0
-  printf '%s' '${b64(config.idleBundle)}' | base64 --decode > /opt/cloudbox/idle.mjs
-  printf '%s' '${b64(config.machinesBundle)}' | base64 --decode > /opt/cloudbox/machines.mjs
+  printf '%s' '${gzipB64(config.idleBundle)}' | base64 --decode | gzip --decompress > /opt/cloudbox/idle.mjs
+  printf '%s' '${gzipB64(config.machinesBundle)}' | base64 --decode | gzip --decompress > /opt/cloudbox/machines.mjs
   printf '%s' '${b64(idleConfig)}' | base64 --decode > /etc/cloudbox/config.json
   chmod 755 /opt/cloudbox/idle.mjs /opt/cloudbox/machines.mjs
   chmod 600 /etc/cloudbox/config.json

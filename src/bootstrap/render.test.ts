@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
+import { IdleConfig } from "../box/idleConfig.ts";
 import { CloudboxConfig } from "../config.ts";
 import { renderBootstrap, renderUserData } from "./render.ts";
 
@@ -39,6 +40,31 @@ describe("renderBootstrap", () => {
     expect(script).toContain("@openai/codex@0.149.0");
     expect(script).toContain("@earendil-works/pi-coding-agent@0.84.2");
     expect(script).toContain("opencode-ai@1.18.21");
+  });
+
+  it("renders an AWS config that decodes with the idle schema", () => {
+    const script = renderBootstrap({
+      config,
+      sshPublicKey: "ssh-ed25519 AAAATEST laptop",
+      idleBundle: "console.log('idle')",
+    });
+    const encodedConfig =
+      /printf '%s' '([^']+)' \| base64 --decode > \/etc\/cloudbox\/config\.json/.exec(
+        script,
+      )?.[1];
+
+    expect(encodedConfig).toBeDefined();
+    expect(
+      Schema.decodeUnknownSync(Schema.fromJsonString(IdleConfig))(
+        Buffer.from(encodedConfig ?? "", "base64").toString("utf8"),
+      ),
+    ).toEqual({
+      provider: { kind: "aws", name: "dev", region: "us-east-1" },
+      idleMinutes: 30,
+      t3Port: 3773,
+      t3Activity: { kind: "tcp" },
+      checkIncus: false,
+    });
   });
 
   it("fits the compressed wrapper inside EC2's 16 KiB user-data limit", () => {

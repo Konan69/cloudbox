@@ -51,12 +51,18 @@ const deploymentInputs = (config: CloudboxConfig) =>
           }),
       ),
     );
-    const idleBundle = yield* readInput("dist/idle.mjs", "pnpm build:idle");
     const startupScript =
       config.provider === "aws"
-        ? renderUserData({ config, sshPublicKey, idleBundle })
+        ? renderUserData({
+            config,
+            sshPublicKey,
+            idleBundle: yield* readInput("dist/idle-aws.mjs", "pnpm build:idle:aws"),
+          })
         : renderHostStartupScript({
             boxUser: config.boxUser,
+            name: config.name,
+            project: config.gcp.project,
+            zone: config.gcp.zone,
             zfsDataDevice: `/dev/disk/by-id/google-${gcpDataDiskName(config)}`,
             idleMinutes: config.idleMinutes,
             t3Port: 3773,
@@ -67,7 +73,7 @@ const deploymentInputs = (config: CloudboxConfig) =>
               clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
               clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
             },
-            idleBundle,
+            idleBundle: yield* readInput("dist/idle.mjs", "pnpm build:idle"),
             machinesBundle: yield* readInput("dist/machines.mjs", "pnpm build:machines"),
           });
     const limit = config.provider === "aws" ? 16 * 1024 : 256 * 1024;

@@ -105,7 +105,7 @@ pnpm test
 pnpm cloudbox --help
 ```
 
-`dist/idle.mjs` is intentionally unbundled. GCP host bootstrap also embeds `dist/machines.mjs`; its compressed startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. Bootstrap installs pinned runtime dependencies under `/opt/cloudbox`. The laptop CLI is bundled to `dist/cli.mjs`.
+`dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. The GCP bootstrap embeds gzip-compressed copies, and its startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`.
 
 ## First run
 

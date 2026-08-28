@@ -5,7 +5,15 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { execFile } from "node:child_process";
+import { createHash, createHmac } from "node:crypto";
 import { pathToFileURL } from "node:url";
+
+import {
+  IdleConfig,
+  type AuthenticatedT3Activity,
+  type AwsIdleProvider,
+  type GcpIdleProvider,
+} from "./idleConfig.ts";
 
 const CONFIG_PATH = "/etc/cloudbox/config.json";
 const STATE_PATH = "/var/lib/cloudbox/idle.json";
@@ -13,42 +21,6 @@ const KEEP_AWAKE_PATH = "/run/cloudbox/keepawake";
 const AWS_IMDS_BASE = "http://169.254.169.254/latest";
 const GCP_METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1";
 const GCP_COMPUTE_API = "https://compute.googleapis.com/compute/v1";
-
-const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
-
-const AwsIdleProvider = Schema.Struct({
-  kind: Schema.Literal("aws"),
-  name: Schema.NonEmptyString,
-  region: Schema.NonEmptyString,
-});
-
-type AwsIdleProvider = typeof AwsIdleProvider.Type;
-
-const GcpIdleProvider = Schema.Struct({
-  kind: Schema.Literal("gcp"),
-  name: Schema.NonEmptyString,
-  project: Schema.NonEmptyString,
-  zone: Schema.NonEmptyString,
-});
-
-type GcpIdleProvider = typeof GcpIdleProvider.Type;
-
-const TcpT3Activity = Schema.Struct({ kind: Schema.Literal("tcp") });
-const AuthenticatedT3Activity = Schema.Struct({
-  kind: Schema.Literal("authenticated"),
-  baseDir: Schema.NonEmptyString,
-  tokenPath: Schema.NonEmptyString,
-});
-
-export const IdleConfig = Schema.Struct({
-  provider: Schema.Union([AwsIdleProvider, GcpIdleProvider]),
-  idleMinutes: PositiveInteger,
-  t3Port: PositiveInteger,
-  t3Activity: Schema.Union([TcpT3Activity, AuthenticatedT3Activity]),
-  checkIncus: Schema.Boolean,
-});
-
-type IdleConfig = typeof IdleConfig.Type;
 
 export const IdleState = Schema.Struct({
   idleSinceEpochMs: Schema.NullOr(Schema.Number),
@@ -209,10 +181,7 @@ const hasEstablishedConnection = (port: number) =>
     `( sport = :${String(port)} or dport = :${String(port)} )`,
   ]).pipe(Effect.map((stdout) => stdout.trim().length > 0));
 
-const hasAuthenticatedT3Activity = (
-  port: number,
-  activity: typeof AuthenticatedT3Activity.Type,
-) =>
+const hasAuthenticatedT3Activity = (port: number, activity: AuthenticatedT3Activity) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const token = (yield* fs.readFileString(activity.tokenPath)).trim();
@@ -298,37 +267,116 @@ const fetchText = (operation: string, url: string, init?: RequestInit) =>
     catch: (cause) => fail(operation, cause),
   });
 
-const getAwsInstanceId = Effect.gen(function* () {
-  const token = yield* fetchText("request IMDSv2 token", `${AWS_IMDS_BASE}/api/token`, {
-    method: "PUT",
-    headers: { "X-aws-ec2-metadata-token-ttl-seconds": "21600" },
+const getAwsInstanceId = (token: string) =>
+  Effect.gen(function* () {
+    const instanceId = yield* fetchText(
+      "read instance id",
+      `${AWS_IMDS_BASE}/meta-data/instance-id`,
+      { headers: { "X-Aws-Ec2-Metadata-Token": token } },
+    );
+    if (!instanceId.startsWith("i-")) {
+      return yield* Effect.fail(fail("validate instance id", instanceId));
+    }
+    return instanceId.trim();
   });
-  const instanceId = yield* fetchText(
-    "read instance id",
-    `${AWS_IMDS_BASE}/meta-data/instance-id`,
-    { headers: { "X-aws-ec2-metadata-token": token } },
-  );
-  if (!instanceId.startsWith("i-")) {
-    return yield* Effect.fail(fail("validate instance id", instanceId));
-  }
-  return instanceId.trim();
+
+const AwsRoleCredentials = Schema.Struct({
+  AccessKeyId: Schema.NonEmptyString,
+  SecretAccessKey: Schema.NonEmptyString,
+  Token: Schema.NonEmptyString,
 });
+
+const sha256 = (value: string): string =>
+  createHash("sha256").update(value, "utf8").digest("hex");
+
+const hmacSha256 = (key: string | Buffer, value: string): Buffer =>
+  createHmac("sha256", key).update(value, "utf8").digest();
 
 const hibernateAws = (provider: AwsIdleProvider) =>
   Effect.gen(function* () {
-    const instanceId = yield* getAwsInstanceId;
-    const { EC2Client, StopInstancesCommand } = yield* Effect.promise(
-      () => import("@aws-sdk/client-ec2"),
+    const token = yield* fetchText("request IMDSv2 token", `${AWS_IMDS_BASE}/api/token`, {
+      method: "PUT",
+      headers: { "X-Aws-Ec2-Metadata-Token-Ttl-Seconds": "21600" },
+    });
+    const instanceId = yield* getAwsInstanceId(token);
+    const metadataHeaders = { "X-Aws-Ec2-Metadata-Token": token };
+    const roleName = (
+      yield* fetchText(
+        "read instance IAM role",
+        `${AWS_IMDS_BASE}/meta-data/iam/security-credentials/`,
+        { headers: metadataHeaders },
+      )
+    ).trim();
+    if (roleName.length === 0 || roleName.includes("\n")) {
+      return yield* Effect.fail(fail("validate instance IAM role", roleName));
+    }
+    const credentialsJson = yield* fetchText(
+      "read instance IAM credentials",
+      `${AWS_IMDS_BASE}/meta-data/iam/security-credentials/${encodeURIComponent(roleName)}`,
+      { headers: metadataHeaders },
     );
-    const client = new EC2Client({ region: provider.region });
+    const credentials = yield* Schema.decodeUnknownEffect(
+      Schema.fromJsonString(AwsRoleCredentials),
+    )(credentialsJson).pipe(
+      Effect.mapError((cause) => fail("decode instance IAM credentials", cause)),
+    );
+
+    const body = new URLSearchParams({
+      Action: "StopInstances",
+      "InstanceId.1": instanceId,
+      Hibernate: "true",
+      Version: "2016-11-15",
+    }).toString();
+    const now = yield* Effect.sync(() => new Date());
+    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = amzDate.slice(0, 8);
+    const host = `ec2.${provider.region}.${provider.region.startsWith("cn-") ? "amazonaws.com.cn" : "amazonaws.com"}`;
+    const contentType = "application/x-www-form-urlencoded; charset=utf-8";
+    const canonicalHeaders =
+      `content-type:${contentType}\n` +
+      `host:${host}\n` +
+      `x-amz-date:${amzDate}\n` +
+      `x-amz-security-token:${credentials.Token}\n`;
+    const signedHeaders = "content-type;host;x-amz-date;x-amz-security-token";
+    const canonicalRequest = [
+      "POST",
+      "/",
+      "",
+      canonicalHeaders,
+      signedHeaders,
+      sha256(body),
+    ].join("\n");
+    const credentialScope = `${dateStamp}/${provider.region}/ec2/aws4_request`;
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      amzDate,
+      credentialScope,
+      sha256(canonicalRequest),
+    ].join("\n");
+    const dateKey = hmacSha256(`AWS4${credentials.SecretAccessKey}`, dateStamp);
+    const regionKey = hmacSha256(dateKey, provider.region);
+    const serviceKey = hmacSha256(regionKey, "ec2");
+    const signingKey = hmacSha256(serviceKey, "aws4_request");
+    const signature = hmacSha256(signingKey, stringToSign).toString("hex");
+
     yield* Effect.tryPromise({
-      try: () =>
-        client.send(
-          new StopInstancesCommand({
-            InstanceIds: [instanceId],
-            Hibernate: true,
-          }),
-        ),
+      try: async () => {
+        const response = await fetch(`https://${host}/`, {
+          method: "POST",
+          headers: {
+            Authorization:
+              `AWS4-HMAC-SHA256 Credential=${credentials.AccessKeyId}/${credentialScope}, ` +
+              `SignedHeaders=${signedHeaders}, Signature=${signature}`,
+            "Content-Type": contentType,
+            "X-Amz-Date": amzDate,
+            "X-Amz-Security-Token": credentials.Token,
+          },
+          body,
+        });
+        if (!response.ok) {
+          throw new Error(`EC2 returned HTTP ${String(response.status)}: ${await response.text()}`);
+        }
+      },
       catch: (cause) => fail(`hibernate ${instanceId}`, cause),
     });
     yield* Effect.logInfo(`hibernation requested for ${instanceId}`);
@@ -411,5 +459,9 @@ export const program = Effect.gen(function* () {
 });
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  program.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    console.log("Usage: cloudbox-idle\n\nCheck host activity and suspend it after the configured idle period.");
+  } else {
+    program.pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain);
+  }
 }

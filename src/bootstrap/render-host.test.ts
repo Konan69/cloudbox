@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
+import { IdleConfig } from "../box/idleConfig.ts";
 import {
   HOST_AGENT_PACKAGES,
   renderHostBootstrap,
@@ -9,6 +12,9 @@ import {
 
 const config = {
   boxUser: "dev",
+  name: "test",
+  project: "cloudbox-project",
+  zone: "us-central1-a",
   zfsDataDevice: "/dev/disk/by-id/google-agent-data",
   idleMinutes: 45,
   t3Port: 3773,
@@ -47,9 +53,25 @@ describe("renderHostBootstrap", () => {
       script,
     )?.[1];
     expect(encodedConfig).toBeDefined();
-    const idleConfig = Buffer.from(encodedConfig ?? "", "base64").toString("utf8");
-    expect(idleConfig).toContain('"idleMinutes": 45');
-    expect(idleConfig).toContain('"checkIncus": true');
+    const idleConfig = Schema.decodeUnknownSync(Schema.fromJsonString(IdleConfig))(
+      Buffer.from(encodedConfig ?? "", "base64").toString("utf8"),
+    );
+    expect(idleConfig).toEqual({
+      provider: {
+        kind: "gcp",
+        name: "test",
+        project: "cloudbox-project",
+        zone: "us-central1-a",
+      },
+      idleMinutes: 45,
+      t3Port: 3773,
+      t3Activity: {
+        kind: "authenticated",
+        baseDir: "/home/dev/.t3",
+        tokenPath: "/home/dev/.t3/idle-detector.token",
+      },
+      checkIncus: true,
+    });
     expect(script).not.toContain("service install");
     for (const packageName of HOST_AGENT_PACKAGES) expect(script).toContain(packageName);
   });
@@ -62,8 +84,12 @@ describe("renderHostBootstrap", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("compresses the startup script below GCE's metadata value limit", () => {
-    const startupScript = renderHostStartupScript(config);
+  it("compresses the built bundles below GCE's metadata value limit", () => {
+    const startupScript = renderHostStartupScript({
+      ...config,
+      idleBundle: readFileSync("dist/idle.mjs", "utf8"),
+      machinesBundle: readFileSync("dist/machines.mjs", "utf8"),
+    });
 
     expect(Buffer.byteLength(startupScript, "utf8")).toBeLessThanOrEqual(256 * 1024);
     expect(startupScript).toContain("gzip --decompress");
