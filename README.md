@@ -4,7 +4,7 @@ One personal AWS EC2 development machine for dev. It runs the patched T3 Code fo
 
 ## What it creates
 
-- One VPC with public/private subnets and internet routing.
+- One VPC with a public subnet and internet routing.
 - One imported EC2 SSH key and one security group: TCP 22 only from `sshCidr`; unrestricted egress.
 - One EC2 role/profile. The inline policy grants `ec2:StopInstances` and `ec2:DescribeInstances` only with the `ec2:ResourceTag/cloudbox=<name>` condition.
 - One Ubuntu 24.04 x86_64 EC2 instance with an encrypted gp3 root disk, IMDSv2-only metadata, and hibernation enabled at launch.

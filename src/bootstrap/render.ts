@@ -178,7 +178,7 @@ ExecStart=/usr/bin/node /opt/cloudbox/idle.mjs
 NoNewPrivileges=true
 ProtectHome=read-only
 ProtectSystem=strict
-ReadWritePaths=/var/lib/cloudbox /run/cloudbox
+ReadWritePaths=/var/lib/cloudbox
 UNIT
 
 cat > /etc/systemd/system/cloudbox-idle.timer <<'UNIT'
