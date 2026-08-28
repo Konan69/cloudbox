@@ -4,9 +4,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { spawn } from "node:child_process";
+import { chown } from "node:fs";
 
 const GOLDEN_ALIAS = "golden";
 const ARCHIVE_DIRECTORY = "/tank/archive";
+const MACHINE_USER = "dev";
 
 export const MachineName = Schema.NonEmptyString.pipe(
   Schema.check(
@@ -29,15 +31,23 @@ export type CreateMachineOptions = {
 };
 
 export type ExecOptions = {
-  readonly user: number;
   readonly cwd: string;
   readonly tty: boolean;
+};
+
+type MachineIdentity = {
+  readonly uid: number;
+  readonly gid: number;
 };
 
 type CommandOutput = {
   readonly stdout: string;
   readonly stderr: string;
 };
+
+const UnixId = Schema.NumberFromString.pipe(
+  Schema.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+);
 
 export class MachineNameError extends Data.TaggedError("MachineNameError")<{
   readonly value: string;
@@ -85,6 +95,12 @@ export class IncusRunner extends Context.Service<
     readonly stream: (
       operation: string,
       args: ReadonlyArray<string>,
+    ) => Effect.Effect<void, IncusCommandError>;
+    readonly setOwnership: (
+      operation: string,
+      path: string,
+      uid: number,
+      gid: number,
     ) => Effect.Effect<void, IncusCommandError>;
   }
 >()("cloudbox/machines/IncusRunner") {
@@ -161,9 +177,37 @@ export class IncusRunner extends Context.Service<
             }
           });
         }),
+      setOwnership: (operation, path, uid, gid) =>
+        Effect.callback<void, IncusCommandError>((resume) => {
+          chown(path, uid, gid, (cause) => {
+            if (cause === null) {
+              resume(Effect.void);
+            } else {
+              resume(
+                Effect.fail(
+                  commandError(operation, [path, String(uid), String(gid)], `chown failed`, {
+                    cause,
+                  }),
+                ),
+              );
+            }
+          });
+        }),
     }),
   );
 }
+
+const decodeUnixId = (operation: string, value: string) =>
+  Schema.decodeUnknownEffect(UnixId)(value.trim()).pipe(
+    Effect.mapError(
+      (cause) =>
+        new IncusDecodeError({
+          operation,
+          message: `Could not decode ${operation}`,
+          cause,
+        }),
+    ),
+  );
 
 const decodeMachineName = (value: string) =>
   Schema.decodeUnknownEffect(MachineName)(value).pipe(
@@ -207,12 +251,44 @@ export class Machines extends Context.Service<
     Machines,
     Effect.gen(function* () {
       const runner = yield* IncusRunner;
+      const machineIdentities = new Map<string, MachineIdentity>();
 
       const checked = Effect.fn("Machines.checked")(function*(
         operation: string,
         args: ReadonlyArray<string>,
       ) {
         yield* runner.capture(operation, args);
+      });
+
+      const resolveMachineIdentity = Effect.fn("Machines.resolveMachineIdentity")(function*(
+        name: string,
+      ) {
+        const cached = machineIdentities.get(name);
+        if (cached !== undefined) return cached;
+
+        const uidOperation = `resolve ${MACHINE_USER} uid in ${name}`;
+        const uidResult = yield* runner.capture(uidOperation, [
+          "exec",
+          name,
+          "--",
+          "id",
+          "-u",
+          MACHINE_USER,
+        ]);
+        const uid = yield* decodeUnixId(uidOperation, uidResult.stdout);
+        const gidOperation = `resolve ${MACHINE_USER} gid in ${name}`;
+        const gidResult = yield* runner.capture(gidOperation, [
+          "exec",
+          name,
+          "--",
+          "id",
+          "-g",
+          MACHINE_USER,
+        ]);
+        const gid = yield* decodeUnixId(gidOperation, gidResult.stdout);
+        const identity = { uid, gid };
+        machineIdentities.set(name, identity);
+        return identity;
       });
 
       const listMachines = runner.capture("list machines", ["list", "--format=json"]).pipe(
@@ -262,11 +338,14 @@ export class Machines extends Context.Service<
             commandError(`exec ${validName}`, [], "exec requires at least one argv value"),
           );
         }
+        const identity = yield* resolveMachineIdentity(validName);
         yield* runner.stream(`exec ${validName}`, [
           "exec",
           validName,
           "--user",
-          String(options.user),
+          String(identity.uid),
+          "--group",
+          String(identity.gid),
           "--cwd",
           options.cwd,
           options.tty ? "--force-interactive" : "--force-noninteractive",
@@ -293,12 +372,31 @@ export class Machines extends Context.Service<
           archivePath,
           "--compression=zstd",
         ]);
+        const hostUid = process.getuid?.();
+        const hostGid = process.getgid?.();
+        if (hostUid === undefined || hostGid === undefined) {
+          return yield* Effect.fail(
+            commandError(
+              `set ownership of ${archivePath}`,
+              [archivePath],
+              "host UID/GID APIs are unavailable",
+            ),
+          );
+        }
+        yield* runner.setOwnership(
+          `set ownership of ${archivePath}`,
+          archivePath,
+          hostUid,
+          hostGid,
+        );
         yield* checked(`destroy archived machine ${validName}`, ["delete", validName, "--force"]);
+        machineIdentities.delete(validName);
         return archivePath;
       });
 
       const restore = Effect.fn("Machines.restore")(function*(name: string) {
         const validName = yield* decodeMachineName(name);
+        machineIdentities.delete(validName);
         yield* checked(`restore ${validName}`, [
           "import",
           `${ARCHIVE_DIRECTORY}/${validName}.tar.zst`,
@@ -309,6 +407,7 @@ export class Machines extends Context.Service<
       const destroy = Effect.fn("Machines.destroy")(function*(name: string) {
         const validName = yield* decodeMachineName(name);
         yield* checked(`destroy ${validName}`, ["delete", validName, "--force"]);
+        machineIdentities.delete(validName);
       });
 
       return Machines.of({

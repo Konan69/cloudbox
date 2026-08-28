@@ -54,12 +54,11 @@ const execCommand = Command.make(
   "exec",
   {
     name: nameArgument,
-    user: Flag.integer("user").pipe(Flag.withDescription("Required numeric UID.")),
     cwd: Flag.string("cwd").pipe(Flag.withDescription("Required working directory.")),
     tty: Flag.boolean("tty").pipe(Flag.withDescription("Allocate an interactive TTY.")),
     argv: Argument.string("argv").pipe(Argument.variadic({ min: 1 })),
   },
-  ({ argv, cwd, name, tty, user }) => exec(name, argv, { user, cwd, tty }),
+  ({ argv, cwd, name, tty }) => exec(name, argv, { cwd, tty }),
 ).pipe(Command.withDescription("Stream a command inside a machine."));
 
 const snapshotCommand = Command.make(

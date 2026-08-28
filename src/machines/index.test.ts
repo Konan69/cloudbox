@@ -12,7 +12,7 @@ import {
 } from "./index.ts";
 
 type Call = {
-  readonly mode: "capture" | "stream";
+  readonly mode: "capture" | "stream" | "ownership";
   readonly operation: string;
   readonly args: ReadonlyArray<string>;
 };
@@ -27,13 +27,28 @@ const testLayer = (calls: Array<Call>, listJson: string) =>
             Effect.sync(() => {
               calls.push({ mode: "capture", operation, args });
               return {
-                stdout: operation === "list machines" ? listJson : "",
+                stdout:
+                  operation === "list machines"
+                    ? listJson
+                    : operation.includes(" uid in ")
+                      ? "1234\n"
+                      : operation.includes(" gid in ")
+                        ? "2345\n"
+                        : "",
                 stderr: "",
               };
             }),
           stream: (operation, args) =>
             Effect.sync(() => {
               calls.push({ mode: "stream", operation, args });
+            }),
+          setOwnership: (operation, path, uid, gid) =>
+            Effect.sync(() => {
+              calls.push({
+                mode: "ownership",
+                operation,
+                args: [path, String(uid), String(gid)],
+              });
             }),
         }),
       ),
@@ -58,6 +73,11 @@ describe("Machines", () => {
         ["list", "--format=json"],
         ["launch", "golden", "thread-abc", "--vm"],
         ["export", "thread-abc", "/tank/archive/thread-abc.tar.zst", "--compression=zstd"],
+        [
+          "/tank/archive/thread-abc.tar.zst",
+          String(process.getuid?.()),
+          String(process.getgid?.()),
+        ],
         ["delete", "thread-abc", "--force"],
       ]);
     }).pipe(
@@ -77,26 +97,44 @@ describe("Machines", () => {
     );
   });
 
-  it.effect("passes explicit exec identity, cwd, and tty mode", () => {
+  it.effect("resolves and caches the in-machine exec identity by name", () => {
     const calls: Array<Call> = [];
     return Effect.gen(function* () {
-      yield* exec("thread-abc", ["bash", "-lc", "pwd"], {
-        user: 1000,
-        cwd: "/home/dev/project",
-        tty: false,
-      });
-      expect(calls[0]?.args).toEqual([
-        "exec",
-        "thread-abc",
-        "--user",
-        "1000",
-        "--cwd",
-        "/home/dev/project",
-        "--force-noninteractive",
-        "--",
-        "bash",
-        "-lc",
-        "pwd",
+      const options = { cwd: "/home/dev/project", tty: false } as const;
+      yield* exec("thread-abc", ["bash", "-lc", "pwd"], options);
+      yield* exec("thread-abc", ["true"], options);
+
+      expect(calls.map((call) => call.args)).toEqual([
+        ["exec", "thread-abc", "--", "id", "-u", "dev"],
+        ["exec", "thread-abc", "--", "id", "-g", "dev"],
+        [
+          "exec",
+          "thread-abc",
+          "--user",
+          "1234",
+          "--group",
+          "2345",
+          "--cwd",
+          "/home/dev/project",
+          "--force-noninteractive",
+          "--",
+          "bash",
+          "-lc",
+          "pwd",
+        ],
+        [
+          "exec",
+          "thread-abc",
+          "--user",
+          "1234",
+          "--group",
+          "2345",
+          "--cwd",
+          "/home/dev/project",
+          "--force-noninteractive",
+          "--",
+          "true",
+        ],
       ]);
     }).pipe(Effect.provide(testLayer(calls, "[]")));
   });

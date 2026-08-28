@@ -34,10 +34,10 @@ Build the host artifacts with `pnpm build`. The bootstrap installs `dist/machine
 cloudbox-machines list
 cloudbox-machines create <thread-id> [--vm]
 cloudbox-machines start|stop|destroy <name>
-cloudbox-machines exec <name> --user 1000 --cwd /home/dev [--tty] -- <argv...>
+cloudbox-machines exec <name> --cwd /home/dev [--tty] -- <argv...>
 cloudbox-machines snapshot <name> <snapshot-name>
 cloudbox-machines archive <name>
 cloudbox-machines restore <name>
 ```
 
-Create names instances `thread-<thread-id>` and rejects values that cannot form a valid Incus name. Archives are written to `/tank/archive/<name>.tar.zst`. Archive destroys the instance only after a successful export.
+Create names instances `thread-<thread-id>` and rejects values that cannot form a valid Incus name. Exec resolves the `dev` UID and GID inside each running machine and caches that identity; the golden image currently assigns that in-machine user UID 1000. Archives are written to `/tank/archive/<name>.tar.zst`, owned by the invoking host process UID/GID. Archive destroys the instance only after a successful export.
