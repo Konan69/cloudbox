@@ -34,7 +34,7 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain("zpool create");
     expect(script).toContain("source: tank/incus");
     expect(script).toContain("incusbr0");
-    expect(script).toContain("images:ubuntu/24.04 testvm --vm");
+    expect(script).toContain("images:ubuntu/24.04/cloud testvm --vm </dev/null");
     expect(script).toContain("security.nesting=true");
     expect(script).toContain("incus publish golden-build --alias golden");
     expect(script).toContain("--rebuild");
