@@ -215,6 +215,13 @@ phase_verify_incus() {
   incus delete test --force
 
   incus launch images:ubuntu/24.04/cloud testvm --vm </dev/null
+  # A VM's incus-agent comes up seconds after launch; exec before that fails
+  # with "VM agent isn't currently running". Bounded wait, then fail loudly.
+  for attempt in $(seq 1 90); do
+    if incus exec testvm -- true </dev/null >/dev/null 2>&1; then break; fi
+    if [[ "$attempt" = 90 ]]; then echo "testvm agent never became ready" >&2; exit 1; fi
+    sleep 2
+  done
   incus exec testvm -- cloud-init status --wait </dev/null
   incus exec testvm -- true </dev/null
   incus delete testvm --force
