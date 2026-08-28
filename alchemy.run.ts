@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
+import { renderHostStartupScript } from "./src/bootstrap/render-host.ts";
 import { renderUserData } from "./src/bootstrap/render.ts";
 import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
 import { loadConfig } from "./src/config.ts";
@@ -26,9 +27,21 @@ const expandHome = (path: string): string =>
     ? NodePath.join(NodeOs.homedir(), path.slice(2))
     : NodePath.resolve(path);
 
+const gcpDataDiskName = (config: GcpCloudboxConfig): string => `cloudbox-${config.name}-data`;
+
 const deploymentInputs = (config: CloudboxConfig) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const readInput = (path: string, buildCommand: string) =>
+      fs.readFileString(path).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DeploymentInputError({
+              message: `${path} is required; run ${buildCommand}`,
+              cause,
+            }),
+        ),
+      );
     const sshPublicKey = yield* fs.readFileString(expandHome(config.sshPublicKeyPath)).pipe(
       Effect.mapError(
         (cause) =>
@@ -38,24 +51,34 @@ const deploymentInputs = (config: CloudboxConfig) =>
           }),
       ),
     );
-    const idleBundle = yield* fs.readFileString("dist/idle.mjs").pipe(
-      Effect.mapError(
-        (cause) =>
-          new DeploymentInputError({
-            message: "dist/idle.mjs is required; run pnpm build:idle",
-            cause,
-          }),
-      ),
-    );
-    const userData = renderUserData({ config, sshPublicKey, idleBundle });
-    if (config.provider === "aws" && Buffer.byteLength(userData, "utf8") > 16 * 1024) {
+    const idleBundle = yield* readInput("dist/idle.mjs", "pnpm build:idle");
+    const startupScript =
+      config.provider === "aws"
+        ? renderUserData({ config, sshPublicKey, idleBundle })
+        : renderHostStartupScript({
+            boxUser: config.boxUser,
+            zfsDataDevice: `/dev/disk/by-id/google-${gcpDataDiskName(config)}`,
+            idleMinutes: config.idleMinutes,
+            t3Port: 3773,
+            t3: {
+              repoUrl: config.t3.repoUrl,
+              branch: config.t3.branch,
+              relayUrl: "https://relay.t3.codes",
+              clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
+              clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
+            },
+            idleBundle,
+            machinesBundle: yield* readInput("dist/machines.mjs", "pnpm build:machines"),
+          });
+    const limit = config.provider === "aws" ? 16 * 1024 : 256 * 1024;
+    if (Buffer.byteLength(startupScript, "utf8") > limit) {
       return yield* Effect.fail(
         new DeploymentInputError({
-          message: "Rendered EC2 user data exceeds the 16 KiB launch limit",
+          message: `Rendered ${config.provider === "aws" ? "EC2 user data" : "GCE startup script"} exceeds the ${config.provider === "aws" ? "16 KiB" : "256 KiB"} launch limit`,
         }),
       );
     }
-    return { sshPublicKey, userData };
+    return { sshPublicKey, startupScript };
   });
 
 const awsProviders = Layer.unwrap(
@@ -239,10 +262,10 @@ const deployAws = (config: AwsCloudboxConfig, sshPublicKey: string, userData: st
     };
   });
 
-const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, userData: string) =>
+const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScript: string) =>
   Effect.gen(function* () {
     const instanceName = `cloudbox-${config.name}`;
-    const dataDiskName = `${instanceName}-data`;
+    const dataDiskName = gcpDataDiskName(config);
     const networkTag = instanceName;
     yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
       project: config.gcp.project,
@@ -267,7 +290,7 @@ const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, userData: st
       bootDiskGb: config.gcp.bootDiskGb,
       dataDiskName: disk.dataDiskName,
       networkTag,
-      startupScript: userData,
+      startupScript,
       sshPublicKey: sshPublicKey.trim(),
       cloudboxName: config.name,
     });
@@ -284,9 +307,9 @@ export default Alchemy.Stack(
   { providers: cloudProviders, state: Alchemy.localState() },
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
-    const { sshPublicKey, userData } = yield* deploymentInputs(config).pipe(Effect.orDie);
+    const { sshPublicKey, startupScript } = yield* deploymentInputs(config).pipe(Effect.orDie);
     return config.provider === "aws"
-      ? yield* deployAws(config, sshPublicKey, userData)
-      : yield* deployGcp(config, sshPublicKey, userData);
+      ? yield* deployAws(config, sshPublicKey, startupScript)
+      : yield* deployGcp(config, sshPublicKey, startupScript);
   }),
 );

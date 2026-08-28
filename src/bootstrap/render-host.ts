@@ -1,3 +1,5 @@
+import { gzipSync } from "node:zlib";
+
 export interface HostBootstrapConfig {
   readonly boxUser: "dev";
   readonly zfsDataDevice: string;
@@ -420,4 +422,13 @@ run_phase 08-cloudbox-tools 0 phase_cloudbox_tools
 
 echo "cloudbox host bootstrap v2 completed"
 `;
+};
+
+/**
+ * Compute Engine limits an inline startup-script metadata value to 256 KiB.
+ * The wrapper keeps the host bootstrap and its embedded bundles below that limit.
+ */
+export const renderHostStartupScript = (config: HostBootstrapConfig): string => {
+  const compressed = gzipSync(Buffer.from(renderHostBootstrap(config), "utf8"), { level: 9 });
+  return `#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s' '${compressed.toString("base64")}' | base64 --decode | gzip --decompress | bash\n`;
 };

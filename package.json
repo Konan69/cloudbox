@@ -13,7 +13,7 @@
     "build:idle": "esbuild src/box/idle.ts --platform=node --format=esm --target=node24 --outfile=dist/idle.mjs",
     "build:machines": "esbuild src/machines/cli.ts --bundle --packages=external --platform=node --format=esm --target=node24 --outfile=dist/machines.mjs",
     "cloudbox": "node dist/cli.mjs",
-    "deploy": "pnpm build:idle && alchemy deploy",
+    "deploy": "pnpm build:idle && pnpm build:machines && alchemy deploy",
     "destroy": "alchemy destroy",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

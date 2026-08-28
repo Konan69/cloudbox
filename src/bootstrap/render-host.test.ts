@@ -1,7 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 import { spawnSync } from "node:child_process";
 
-import { HOST_AGENT_PACKAGES, renderHostBootstrap } from "./render-host.ts";
+import {
+  HOST_AGENT_PACKAGES,
+  renderHostBootstrap,
+  renderHostStartupScript,
+} from "./render-host.ts";
 
 const config = {
   boxUser: "dev",
@@ -55,6 +59,15 @@ describe("renderHostBootstrap", () => {
       input: renderHostBootstrap(config),
       encoding: "utf8",
     });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("compresses the startup script below GCE's metadata value limit", () => {
+    const startupScript = renderHostStartupScript(config);
+
+    expect(Buffer.byteLength(startupScript, "utf8")).toBeLessThanOrEqual(256 * 1024);
+    expect(startupScript).toContain("gzip --decompress");
+    const result = spawnSync("bash", ["-n"], { input: startupScript, encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
   });
 });
