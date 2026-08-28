@@ -209,12 +209,12 @@ phase_verify_incus() {
   for name in test testvm; do
     if incus info "$name" >/dev/null 2>&1; then incus delete "$name" --force; fi
   done
-  incus launch images:ubuntu/24.04 test </dev/null
+  incus launch images:ubuntu/24.04/cloud test </dev/null
   incus exec test -- cloud-init status --wait </dev/null
   incus exec test -- true </dev/null
   incus delete test --force
 
-  incus launch images:ubuntu/24.04 testvm --vm </dev/null
+  incus launch images:ubuntu/24.04/cloud testvm --vm </dev/null
   incus exec testvm -- cloud-init status --wait </dev/null
   incus exec testvm -- true </dev/null
   incus delete testvm --force
@@ -232,7 +232,7 @@ phase_golden() {
 
   # incus launch/exec parse stdin as instance YAML when it is not a TTY; the GCE
   # metadata runner hands this script in on stdin, so every call gets /dev/null.
-  incus launch images:ubuntu/24.04 golden-build \
+  incus launch images:ubuntu/24.04/cloud golden-build \
     -c security.nesting=true \
     -c security.syscalls.intercept.mknod=true \
     -c security.syscalls.intercept.setxattr=true </dev/null
