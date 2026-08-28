@@ -200,10 +200,12 @@ const sleepCommand = Command.make("sleep").pipe(
 );
 
 const dryRunFlag = Flag.boolean("dry-run").pipe(
+  Flag.withDefault(false),
   Flag.withDescription("Print rsync changes without modifying the box."),
 );
 
 const forceFlag = Flag.boolean("force").pipe(
+  Flag.withDefault(false),
   Flag.withDescription("Transfer even when the dry-run total exceeds identity.maxTransferMb."),
 );
 
