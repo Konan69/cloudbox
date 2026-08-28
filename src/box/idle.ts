@@ -83,7 +83,24 @@ const parseProcesses = (stdout: string): ReadonlyArray<ProcessRow> =>
 
 const hasBusyProcess = (rows: ReadonlyArray<ProcessRow>): boolean => {
   const agentNames = new Set(["claude", "codex", "pi", "opencode"]);
-  if (rows.some((row) => agentNames.has(row.command))) return true;
+  const packageMarkers = [
+    "@anthropic-ai/claude-code",
+    "@openai/codex",
+    "@earendil-works/pi-coding-agent",
+    "opencode-ai",
+  ];
+  const isAgent = (row: ProcessRow): boolean => {
+    if (agentNames.has(row.command)) return true;
+    const executableNames = row.args
+      .split(/\s+/)
+      .slice(0, 3)
+      .map((argument) => argument.split("/").at(-1)?.replace(/\.(?:js|mjs|cjs)$/, ""));
+    return (
+      executableNames.some((name) => name !== undefined && agentNames.has(name)) ||
+      packageMarkers.some((marker) => row.args.includes(marker))
+    );
+  };
+  if (rows.some(isAgent)) return true;
 
   const t3Pids = new Set(
     rows

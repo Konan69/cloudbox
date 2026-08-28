@@ -20,9 +20,8 @@
       "~/.config/gh"
     ],
     "excludes": [
-      ".pi/agent/sessions/",
-      ".pi/agent/pi-debug.log",
-      ".codex/sessions/"
+      "sessions/",
+      "pi-debug.log"
     ]
   },
   "boxUser": "dev"
