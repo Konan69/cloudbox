@@ -3,6 +3,7 @@ import * as Alchemy from "alchemy";
 import * as AWS from "alchemy/AWS";
 import * as AWSRegion from "alchemy/AWS/Region";
 import * as Output from "alchemy/Output";
+import * as Random from "alchemy/Random";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -121,7 +122,9 @@ const gcpProviders = Layer.unwrap(
   ),
 );
 
-const cloudProviders = Layer.merge(awsProviders, gcpProviders);
+// Alchemy.makeRandom (wake bearer secret) is served by Alchemy's built-in Random
+// provider, which is not part of any cloud provider layer.
+const cloudProviders = Layer.mergeAll(awsProviders, gcpProviders, Random.RandomProvider());
 
 const makeInstanceTemplate = (config: AwsCloudboxConfig, userData: string) =>
   JSON.stringify({
