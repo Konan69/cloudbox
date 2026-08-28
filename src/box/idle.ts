@@ -15,11 +15,27 @@ const IMDS_BASE = "http://169.254.169.254/latest";
 
 const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
 
-export const IdleConfig = Schema.Struct({
+const AwsIdleProvider = Schema.Struct({
+  kind: Schema.Literal("aws"),
   name: Schema.NonEmptyString,
   region: Schema.NonEmptyString,
+});
+
+const GcpIdleProvider = Schema.Struct({ kind: Schema.Literal("gcp") });
+
+const TcpT3Activity = Schema.Struct({ kind: Schema.Literal("tcp") });
+const AuthenticatedT3Activity = Schema.Struct({
+  kind: Schema.Literal("authenticated"),
+  baseDir: Schema.NonEmptyString,
+  tokenPath: Schema.NonEmptyString,
+});
+
+export const IdleConfig = Schema.Struct({
+  provider: Schema.Union([AwsIdleProvider, GcpIdleProvider]),
   idleMinutes: PositiveInteger,
   t3Port: PositiveInteger,
+  t3Activity: Schema.Union([TcpT3Activity, AuthenticatedT3Activity]),
+  checkIncus: Schema.Boolean,
 });
 
 type IdleConfig = typeof IdleConfig.Type;
@@ -38,6 +54,19 @@ type ProcessRow = {
   readonly args: string;
 };
 
+type CommandResult = {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+};
+
+const IncusInstance = Schema.Struct({
+  name: Schema.NonEmptyString,
+  status: Schema.NonEmptyString,
+});
+
+const T3Client = Schema.Struct({ connected: Schema.Boolean });
+
 export class IdleError extends Data.TaggedError("IdleError")<{
   readonly operation: string;
   readonly message: string;
@@ -47,16 +76,34 @@ export class IdleError extends Data.TaggedError("IdleError")<{
 const fail = (operation: string, cause: unknown) =>
   new IdleError({ operation, message: `${operation} failed`, cause });
 
-const run = (command: string, args: ReadonlyArray<string>) =>
-  Effect.callback<string, IdleError>((resume) => {
-    execFile(command, [...args], { encoding: "utf8" }, (error, stdout) => {
-      if (error !== null) {
-        resume(Effect.fail(fail(`${command} ${args.join(" ")}`, error)));
-      } else {
-        resume(Effect.succeed(stdout));
+const runResult = (command: string, args: ReadonlyArray<string>) =>
+  Effect.callback<CommandResult, IdleError>((resume) => {
+    execFile(command, [...args], { encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error === null) {
+        resume(Effect.succeed({ exitCode: 0, stdout, stderr }));
+        return;
       }
+      if (typeof error.code === "number") {
+        resume(Effect.succeed({ exitCode: error.code, stdout, stderr }));
+        return;
+      }
+      resume(Effect.fail(fail(`${command} ${args.join(" ")}`, error)));
     });
   });
+
+const run = (command: string, args: ReadonlyArray<string>) =>
+  runResult(command, args).pipe(
+    Effect.flatMap((result) =>
+      result.exitCode === 0
+        ? Effect.succeed(result.stdout)
+        : Effect.fail(
+            fail(
+              `${command} ${args.join(" ")}`,
+              new Error(`exit ${String(result.exitCode)}: ${result.stderr.trim()}`),
+            ),
+          ),
+    ),
+  );
 
 const parseProcesses = (stdout: string): ReadonlyArray<ProcessRow> =>
   stdout
@@ -152,6 +199,68 @@ const hasEstablishedConnection = (port: number) =>
     `( sport = :${String(port)} or dport = :${String(port)} )`,
   ]).pipe(Effect.map((stdout) => stdout.trim().length > 0));
 
+const hasAuthenticatedT3Activity = (
+  port: number,
+  activity: typeof AuthenticatedT3Activity.Type,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const token = (yield* fs.readFileString(activity.tokenPath)).trim();
+    const clientsJson = yield* Effect.tryPromise({
+      try: async () => {
+        const response = await fetch(`http://127.0.0.1:${String(port)}/api/auth/clients`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error(`T3 returned HTTP ${String(response.status)}`);
+        return response.text();
+      },
+      catch: (cause) => fail("read active T3 clients", cause),
+    });
+    const clients = yield* Schema.decodeUnknownEffect(
+      Schema.fromJsonString(Schema.Array(T3Client)),
+    )(clientsJson).pipe(Effect.mapError((cause) => fail("decode active T3 clients", cause)));
+    if (clients.some((client) => client.connected)) return true;
+
+    const count = yield* run("sqlite3", [
+      "-readonly",
+      `${activity.baseDir}/userdata/state.sqlite`,
+      "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running');",
+    ]);
+    const running = yield* Schema.decodeUnknownEffect(Schema.NumberFromString)(count.trim()).pipe(
+      Effect.mapError((cause) => fail("decode running T3 agent count", cause)),
+    );
+    return running > 0;
+  }).pipe(Effect.mapError((cause) => fail("authenticated T3 activity detection", cause)));
+
+const hasIncusAgentProcess = Effect.gen(function* () {
+  const stdout = yield* run("incus", ["list", "--format=json"]);
+  const instances = yield* Schema.decodeUnknownEffect(
+    Schema.fromJsonString(Schema.Array(IncusInstance)),
+  )(stdout).pipe(Effect.mapError((cause) => fail("decode incus instance list", cause)));
+
+  for (const instance of instances) {
+    if (instance.status.toUpperCase() !== "RUNNING") continue;
+    const probe = yield* runResult("incus", [
+      "exec",
+      instance.name,
+      "--",
+      "pgrep",
+      "-f",
+      "(^|/)([c]laude|[c]odex|[p]i|[o]pencode)( |$)|@anthropic-ai/claude-code|@openai/codex|@earendil-works/pi-coding-agent|opencode-ai",
+    ]);
+    if (probe.exitCode === 0) return true;
+    if (probe.exitCode !== 1) {
+      return yield* Effect.fail(
+        fail(
+          `probe agent processes in ${instance.name}`,
+          new Error(`incus exec exited ${String(probe.exitCode)}: ${probe.stderr.trim()}`),
+        ),
+      );
+    }
+  }
+  return false;
+});
+
 const isBusy = (config: IdleConfig) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -160,6 +269,10 @@ const isBusy = (config: IdleConfig) =>
       Effect.map(parseProcesses),
     );
     if (hasBusyProcess(rows)) return true;
+    if (config.checkIncus && (yield* hasIncusAgentProcess)) return true;
+    if (config.t3Activity.kind === "authenticated") {
+      return yield* hasAuthenticatedT3Activity(config.t3Port, config.t3Activity);
+    }
     return yield* hasEstablishedConnection(config.t3Port);
   }).pipe(Effect.mapError((cause) => fail("activity detection", cause)));
 
@@ -175,7 +288,7 @@ const fetchText = (operation: string, url: string, init?: RequestInit) =>
     catch: (cause) => fail(operation, cause),
   });
 
-const getInstanceId = Effect.gen(function* () {
+const getAwsInstanceId = Effect.gen(function* () {
   const token = yield* fetchText("request IMDSv2 token", `${IMDS_BASE}/api/token`, {
     method: "PUT",
     headers: { "X-aws-ec2-metadata-token-ttl-seconds": "21600" },
@@ -191,10 +304,16 @@ const getInstanceId = Effect.gen(function* () {
   return instanceId.trim();
 });
 
-const hibernate = (config: IdleConfig) =>
+const sleepHost = (provider: IdleConfig["provider"]) =>
   Effect.gen(function* () {
-    const instanceId = yield* getInstanceId;
-    const client = new EC2Client({ region: config.region });
+    if (provider.kind === "gcp") {
+      yield* run("systemctl", ["poweroff"]);
+      yield* Effect.logInfo("GCP host poweroff requested");
+      return;
+    }
+
+    const instanceId = yield* getAwsInstanceId;
+    const client = new EC2Client({ region: provider.region });
     yield* Effect.tryPromise({
       try: () =>
         client.send(
@@ -234,7 +353,7 @@ export const program = Effect.gen(function* () {
     `cloudbox idle for ${String(Math.floor(idleForMs / 60_000))} minute(s)`,
   );
   if (idleForMs >= thresholdMs) {
-    yield* hibernate(config);
+    yield* sleepHost(config.provider);
   }
 });
 
