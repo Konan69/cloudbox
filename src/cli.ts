@@ -525,13 +525,17 @@ const smokeThreadCommand = Command.make("smoke-thread", {
     Flag.withDefault(240),
     Flag.withDescription("Maximum seconds for each provider turn."),
   ),
+  keepProject: Flag.boolean("keep-project").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription("Leave the smoke project in the T3 environment after the run."),
+  ),
 }).pipe(
   Command.withDescription("Run autonomous pi and Codex agent turns through the remote T3 server."),
-  Command.withHandler(({ host, timeout }) =>
+  Command.withHandler(({ host, keepProject, timeout }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig("cloudbox.json");
       const transport = yield* makeSshThreadSmokeTransport(config, host);
-      const report = yield* runThreadSmokeSuite(transport, timeout);
+      const report = yield* runThreadSmokeSuite(transport, { keepProject, timeoutSeconds: timeout });
       yield* Console.log(formatThreadSmokeReport(report));
       if (!report.ok) {
         yield* Effect.sync(() => {

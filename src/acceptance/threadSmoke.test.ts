@@ -37,13 +37,25 @@ const completedThread = (assistantText: string): ThreadSmokeThreadSnapshot => ({
 const makeFakeTransport = (input?: {
   readonly providers?: ReadonlyArray<ThreadSmokeProvider>;
   readonly assistantText?: string;
+  readonly piEnabled?: boolean;
 }) => {
   const commands: Array<Readonly<Record<string, unknown>>> = [];
+  const settingsUpdates: Array<Readonly<Record<string, unknown>>> = [];
   const projects: ThreadSmokeProject[] = [];
-  const providers = input?.providers ?? [
+  let providers = input?.providers ?? [
     provider("pi", "openai-codex/gpt-5.6-sol"),
     provider("codex", "gpt-5.6-sol"),
   ];
+  const piEnabled = input?.piEnabled ?? true;
+  const piSettings: Record<string, unknown> = {
+    enabled: piEnabled,
+    binaryPath: "pi",
+    defaultModel: piEnabled ? "openai-codex/gpt-5.6-sol" : "",
+    excludedProviders: "google, openai, anthropic, opencode-go",
+    launchArgs: "",
+    customModels: [],
+  };
+  let providerInstances: Record<string, Readonly<Record<string, unknown>>> = {};
   const assistantText = input?.assistantText ?? "CLOUDBOX_SMOKE_OK\n6.17.0-1022-gcp";
 
   const dispatch = async (command: Readonly<Record<string, unknown>>) => {
@@ -57,6 +69,20 @@ const makeFakeTransport = (input?: {
   };
 
   const transport: ThreadSmokeTransport = {
+    readEnvironmentId: async () => "environment-test",
+    readSettings: async () => ({ pi: piSettings, providerInstances }),
+    updateSettings: async (patch) => {
+      settingsUpdates.push(patch);
+      const replacement = patch.providerInstances as Record<string, Readonly<Record<string, unknown>>>;
+      providerInstances = replacement;
+      const piInstance = replacement.pi;
+      const config = piInstance?.config as Record<string, unknown> | undefined;
+      piSettings.enabled = piInstance?.enabled === true;
+      piSettings.defaultModel = config?.defaultModel ?? "";
+      providers = providers.map((entry) => entry.instanceId === "pi"
+        ? provider("pi", "openai-codex/gpt-5.6-sol")
+        : entry);
+    },
     refreshProviders: async () => providers,
     readSnapshot: async () => ({ snapshotSequence: commands.length, projects }),
     readThread: async () => ({
@@ -73,7 +99,7 @@ const makeFakeTransport = (input?: {
     },
   };
 
-  return { commands, transport };
+  return { commands, settingsUpdates, transport };
 };
 
 describe("T3 thread smoke", () => {
@@ -87,11 +113,14 @@ describe("T3 thread smoke", () => {
         ["pi", true, "deleted"],
         ["codex", true, "deleted"],
       ]);
+      expect(report.environmentId).toBe("environment-test");
+      expect(report.projectCleanup).toBe("deleted");
       expect(fake.commands.filter((command) => command.type === "project.create")).toHaveLength(1);
-      expect(fake.commands.filter((command) => command.type === "project.meta.update")).toHaveLength(1);
+      expect(fake.commands.filter((command) => command.type === "project.meta.update")).toHaveLength(0);
       expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
       expect(fake.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(2);
       expect(fake.commands.filter((command) => command.type === "thread.delete")).toHaveLength(2);
+      expect(fake.commands.filter((command) => command.type === "project.delete")).toHaveLength(1);
 
       const output = formatThreadSmokeReport(report);
       expect(output).toContain("pi PASS");
@@ -100,7 +129,7 @@ describe("T3 thread smoke", () => {
     });
   });
 
-  it.effect("reports the exact pi availability reason and still runs Codex", () => {
+  it.effect("enables disabled pi settings explicitly, then runs pi and Codex", () => {
     const fake = makeFakeTransport({
       providers: [
         provider("pi", "openai-codex/gpt-5.6-sol", {
@@ -112,21 +141,35 @@ describe("T3 thread smoke", () => {
         }),
         provider("codex", "gpt-5.6-sol"),
       ],
+      piEnabled: false,
     });
 
     return Effect.gen(function* () {
-      const report = yield* runThreadSmokeSuite(fake.transport);
+      const report = yield* runThreadSmokeSuite(fake.transport, { keepProject: true });
 
-      expect(report.ok).toBe(false);
-      expect(report.results[0]).toMatchObject({
-        provider: "pi",
-        pass: false,
-        threadId: null,
-        evidence: "pi is disabled in T3 Code settings.",
-        cleanup: "not-needed",
-      });
+      expect(report.ok).toBe(true);
+      expect(report.settingsActions).toEqual([
+        "enabled provider pi in environment settings",
+        "set provider pi default model to openai-codex/gpt-5.6-sol",
+      ]);
+      expect(report.projectCleanup).toBe("kept");
+      expect(report.results[0]).toMatchObject({ provider: "pi", pass: true });
       expect(report.results[1]).toMatchObject({ provider: "codex", pass: true });
-      expect(fake.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(1);
+      expect(fake.settingsUpdates).toHaveLength(1);
+      expect(fake.settingsUpdates[0]).toMatchObject({
+        providerInstances: {
+          pi: {
+            driver: "pi",
+            enabled: true,
+            config: { defaultModel: "openai-codex/gpt-5.6-sol" },
+          },
+        },
+      });
+      expect(fake.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(2);
+      expect(fake.commands.filter((command) => command.type === "project.delete")).toHaveLength(0);
+      expect(formatThreadSmokeReport(report)).toContain(
+        "settings: enabled provider pi in environment settings",
+      );
     });
   });
 

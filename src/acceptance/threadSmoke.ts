@@ -64,7 +64,15 @@ export interface ThreadSmokeTurnInput {
   readonly timeoutMs: number;
 }
 
+export interface ThreadSmokeSettings {
+  readonly pi: Readonly<Record<string, unknown>>;
+  readonly providerInstances: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+}
+
 export interface ThreadSmokeTransport {
+  readonly readEnvironmentId: () => Promise<string>;
+  readonly readSettings: () => Promise<ThreadSmokeSettings>;
+  readonly updateSettings: (patch: Readonly<Record<string, unknown>>) => Promise<void>;
   readonly refreshProviders: () => Promise<ReadonlyArray<ThreadSmokeProvider>>;
   readonly readSnapshot: () => Promise<ThreadSmokeSnapshot>;
   readonly readThread: (threadId: string) => Promise<ThreadSmokeThreadSnapshot>;
@@ -85,7 +93,16 @@ export interface ThreadSmokeCaseResult {
 
 export interface ThreadSmokeReport {
   readonly ok: boolean;
+  readonly environmentId: string;
+  readonly settingsActions: ReadonlyArray<string>;
+  readonly projectId: string;
+  readonly projectCleanup: "kept" | "deleted" | "failed";
   readonly results: ReadonlyArray<ThreadSmokeCaseResult>;
+}
+
+export interface ThreadSmokeOptions {
+  readonly timeoutSeconds?: number;
+  readonly keepProject?: boolean;
 }
 
 interface ProviderCase {
@@ -168,6 +185,7 @@ const validateAssistantText = (assistantText: string): string | undefined => {
 const runProviderCase = async (
   transport: ThreadSmokeTransport,
   providers: ReadonlyArray<ThreadSmokeProvider>,
+  projectId: string,
   expected: ProviderCase,
   timeoutMs: number,
 ): Promise<ThreadSmokeCaseResult> => {
@@ -194,7 +212,6 @@ const runProviderCase = async (
       };
     }
 
-    const projectId = await ensureSmokeProject(transport);
     threadId = makeId(`cloudbox-smoke-${expected.provider}`);
     const modelSelection = { instanceId: expected.provider, model: expected.model };
     await transport.dispatch({
@@ -227,7 +244,6 @@ const runProviderCase = async (
           attachments: [],
         },
         modelSelection,
-        titleSeed: `Cloudbox smoke: ${expected.provider}`,
         runtimeMode: "full-access",
         interactionMode: "default",
         createdAt: nowIso(),
@@ -279,43 +295,130 @@ const runProviderCase = async (
   };
 };
 
+const recordWithout = (
+  record: Readonly<Record<string, unknown>>,
+  key: string,
+): Record<string, unknown> => Object.fromEntries(Object.entries(record).filter(([name]) => name !== key));
+
+const configurePi = async (
+  transport: ThreadSmokeTransport,
+): Promise<ReadonlyArray<string>> => {
+  const settings = await transport.readSettings();
+  const explicit = settings.providerInstances.pi;
+  const explicitConfig = explicit?.config === null || typeof explicit?.config !== "object" || Array.isArray(explicit?.config)
+    ? {}
+    : explicit.config as Readonly<Record<string, unknown>>;
+  const legacyConfig = recordWithout(settings.pi, "enabled");
+  const mergedConfig = {
+    ...legacyConfig,
+    ...recordWithout(explicitConfig, "enabled"),
+  };
+  const enabled = explicit === undefined
+    ? settings.pi.enabled === true
+    : explicit.enabled !== false && explicitConfig.enabled !== false;
+  const defaultModel = typeof mergedConfig.defaultModel === "string" ? mergedConfig.defaultModel : "";
+  const actions: string[] = [];
+
+  if (enabled && defaultModel === PROVIDER_CASES[0]!.model) {
+    return actions;
+  }
+
+  await transport.updateSettings({
+    providerInstances: {
+      ...settings.providerInstances,
+      pi: {
+        ...explicit,
+        driver: "pi",
+        enabled: true,
+        config: {
+          ...mergedConfig,
+          defaultModel: PROVIDER_CASES[0]!.model,
+        },
+      },
+    },
+  });
+  if (!enabled) actions.push("enabled provider pi in environment settings");
+  if (defaultModel !== PROVIDER_CASES[0]!.model) {
+    actions.push(`set provider pi default model to ${PROVIDER_CASES[0]!.model}`);
+  }
+  return actions;
+};
+
 export const runThreadSmokeSuite = (
   transport: ThreadSmokeTransport,
-  timeoutSeconds = 240,
+  options: ThreadSmokeOptions = {},
 ): Effect.Effect<ThreadSmokeReport, ThreadSmokeError> =>
   Effect.tryPromise({
     try: async () => {
-      const providers = await transport.refreshProviders();
-      const results: ThreadSmokeCaseResult[] = [];
-      for (const expected of PROVIDER_CASES) {
-        results.push(
-          await runProviderCase(transport, providers, expected, timeoutSeconds * 1_000),
-        );
+      const environmentId = await transport.readEnvironmentId();
+      const settingsActions = [...await configurePi(transport)];
+      let providers: ReadonlyArray<ThreadSmokeProvider> = [];
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        providers = await transport.refreshProviders();
+        const piReason = providerUnavailableReason(PROVIDER_CASES[0]!, providers);
+        if (piReason === undefined || attempt === 3) break;
+        settingsActions.push(`retrying pi provider refresh after: ${piReason}`);
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
+      const projectId = await ensureSmokeProject(transport);
+      const results: ThreadSmokeCaseResult[] = [];
+      const timeoutMs = (options.timeoutSeconds ?? 240) * 1_000;
+      for (const expected of PROVIDER_CASES) {
+        results.push(await runProviderCase(transport, providers, projectId, expected, timeoutMs));
+      }
+
+      let projectCleanup: ThreadSmokeReport["projectCleanup"] = "kept";
+      if (options.keepProject !== true) {
+        try {
+          await transport.dispatch({
+            type: "project.delete",
+            commandId: makeId("cloudbox-smoke-project-delete"),
+            projectId,
+            force: true,
+          });
+          projectCleanup = "deleted";
+        } catch (cause) {
+          projectCleanup = "failed";
+          settingsActions.push(
+            `project cleanup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        }
+      }
+
       return {
-        ok: results.every((result) => result.pass),
+        ok: results.every((result) => result.pass) && projectCleanup !== "failed",
+        environmentId,
+        settingsActions,
+        projectId,
+        projectCleanup,
         results,
       } satisfies ThreadSmokeReport;
     },
     catch: (cause) => smokeError("smoke thread", "Could not run the T3 thread smoke suite", cause),
   });
 
-export const formatThreadSmokeReport = (report: ThreadSmokeReport): string =>
-  report.results
-    .map((result) => {
-      const lines = [
-        `${result.provider} ${result.pass ? "PASS" : "FAIL"}`,
-        `model: ${result.model}`,
-        `thread: ${result.threadId ?? "not-created"}`,
-        `cleanup: ${result.cleanup}`,
-        `evidence: ${result.evidence}`,
-      ];
-      if (result.assistantText.length > 0) {
-        lines.push("assistant:", result.assistantText);
-      }
-      return lines.join("\n");
-    })
-    .join("\n\n");
+export const formatThreadSmokeReport = (report: ThreadSmokeReport): string => {
+  const header = [
+    `environment: ${report.environmentId}`,
+    ...report.settingsActions.map((action) => `settings: ${action}`),
+    `project: ${report.projectId}`,
+    `project cleanup: ${report.projectCleanup}`,
+  ];
+  const cases = report.results.map((result) => {
+    const lines = [
+      `${result.provider} ${result.pass ? "PASS" : "FAIL"}`,
+      `model: ${result.model}`,
+      `thread: ${result.threadId ?? "not-created"}`,
+      `cleanup: ${result.cleanup}`,
+      `evidence: ${result.evidence}`,
+    ];
+    if (result.assistantText.length > 0) {
+      lines.push("assistant:", result.assistantText);
+    }
+    return lines.join("\n");
+  });
+  return [header.join("\n"), ...cases].join("\n\n");
+};
 
 interface ProcessOutput {
   readonly exitCode: number;
@@ -375,6 +478,10 @@ const sshArgs = (
   "StrictHostKeyChecking=accept-new",
   "-o",
   "ConnectTimeout=10",
+  "-o",
+  "ServerAliveInterval=10",
+  "-o",
+  "ServerAliveCountMax=3",
   ...extra,
   `${config.boxUser}@${host}`,
 ];
@@ -485,27 +592,39 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
   }
 
   async #jsonRequest(path: string, init: RequestInit = {}): Promise<unknown> {
-    const response = await fetch(`${this.#origin}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.#token}`,
-        ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...init.headers,
-      },
-      signal: AbortSignal.timeout(30_000),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw smokeError(
-        `${init.method ?? "GET"} ${path}`,
-        `T3 returned HTTP ${String(response.status)}${text.length > 0 ? `: ${text}` : ""}`,
-      );
+    const operation = `${init.method ?? "GET"} ${path}`;
+    const deadline = Date.now() + 90_000;
+    let lastCause: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(`${this.#origin}${path}`, {
+          ...init,
+          headers: {
+            Authorization: `Bearer ${this.#token}`,
+            ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+            ...init.headers,
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const text = await response.text();
+        if (!response.ok) {
+          throw smokeError(
+            operation,
+            `T3 returned HTTP ${String(response.status)}${text.length > 0 ? `: ${text}` : ""}`,
+          );
+        }
+        try {
+          return text.length === 0 ? {} : JSON.parse(text) as unknown;
+        } catch (cause) {
+          throw smokeError(operation, "T3 returned invalid JSON.", cause);
+        }
+      } catch (cause) {
+        if (cause instanceof ThreadSmokeError) throw cause;
+        lastCause = cause;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
     }
-    try {
-      return text.length === 0 ? {} : JSON.parse(text) as unknown;
-    } catch (cause) {
-      throw smokeError(`${init.method ?? "GET"} ${path}`, "T3 returned invalid JSON.", cause);
-    }
+    throw smokeError(operation, "T3 remained unreachable through the SSH tunnel for 90s.", lastCause);
   }
 
   async #webSocketTicket(): Promise<string> {
@@ -567,6 +686,39 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
         if (!settled) finish(reject, new Error(`${tag} WebSocket closed before completion`));
       });
     });
+  }
+
+  async readEnvironmentId(): Promise<string> {
+    const descriptor = asRecord(
+      await this.#jsonRequest("/.well-known/t3/environment"),
+      "environment descriptor",
+    );
+    const environmentId = asString(descriptor.environmentId);
+    if (environmentId === undefined || environmentId.length === 0) {
+      throw smokeError("environment descriptor", "T3 did not return an environment id.");
+    }
+    return environmentId;
+  }
+
+  async readSettings(): Promise<ThreadSmokeSettings> {
+    const settings = asRecord(await this.#rpcUnary("server.getSettings", {}), "server settings");
+    const providers = asRecord(settings.providers, "server provider settings");
+    const pi = asRecord(providers.pi, "pi provider settings");
+    const providerInstancesValue = asRecord(
+      settings.providerInstances,
+      "provider instance settings",
+    );
+    const providerInstances = Object.fromEntries(
+      Object.entries(providerInstancesValue).map(([instanceId, value]) => [
+        instanceId,
+        asRecord(value, `provider instance ${instanceId}`),
+      ]),
+    );
+    return { pi, providerInstances };
+  }
+
+  async updateSettings(patch: Readonly<Record<string, unknown>>): Promise<void> {
+    await this.#rpcUnary("server.updateSettings", { patch });
   }
 
   async refreshProviders(): Promise<ReadonlyArray<ThreadSmokeProvider>> {
@@ -659,6 +811,37 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
     });
   }
 
+  async #pollTurnAfterDisconnect(
+    threadId: string,
+    timeoutMs: number,
+  ): Promise<ThreadSmokeThreadSnapshot> {
+    const deadline = Date.now() + timeoutMs;
+    let lastCause: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const snapshot = await this.readThread(threadId);
+        if (
+          snapshot.latestTurnState === "completed" ||
+          snapshot.latestTurnState === "error" ||
+          snapshot.latestTurnState === "interrupted" ||
+          snapshot.sessionStatus === "error" ||
+          snapshot.sessionStatus === "stopped" ||
+          snapshot.sessionStatus === "interrupted"
+        ) {
+          return snapshot;
+        }
+      } catch (cause) {
+        lastCause = cause;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+    throw smokeError(
+      "wait for disconnected turn",
+      `Turn did not reach a terminal state within ${String(timeoutMs / 1_000)}s after the event stream disconnected.`,
+      lastCause,
+    );
+  }
+
   async runTurn(input: ThreadSmokeTurnInput): Promise<ThreadSmokeThreadSnapshot> {
     const ticket = await this.#webSocketTicket();
     const wsUrl = this.#origin.replace(/^http/, "ws") +
@@ -669,6 +852,7 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
       let settled = false;
       let started = false;
       let sawRunning = false;
+      let recovering = false;
       let processing = Promise.resolve();
       const timer = setTimeout(
         () => finish(reject, new Error(`Turn timed out after ${String(input.timeoutMs / 1_000)}s`)),
@@ -680,6 +864,17 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
         clearTimeout(timer);
         socket.close();
         complete(value as never);
+      };
+      const recoverAfterDisconnect = (cause: unknown) => {
+        if (!started) {
+          finish(reject, cause);
+          return;
+        }
+        if (recovering || settled) return;
+        recovering = true;
+        void this.#pollTurnAfterDisconnect(input.threadId, input.timeoutMs)
+          .then((snapshot) => finish(resolve, snapshot))
+          .catch((pollCause: unknown) => finish(reject, pollCause));
       };
       const handleStreamItem = async (itemValue: unknown): Promise<void> => {
         const item = asRecord(itemValue, "thread subscription");
@@ -733,13 +928,15 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
           if (message._tag === "Exit" && message.requestId === 1 && !settled) {
             throw new Error(`Thread subscription ended early: ${JSON.stringify(message.exit)}`);
           }
-        }).catch((cause: unknown) => finish(reject, cause));
+        }).catch(recoverAfterDisconnect);
       });
       socket.addEventListener("error", () =>
-        finish(reject, new Error("Thread subscription WebSocket error")),
+        recoverAfterDisconnect(new Error("Thread subscription WebSocket error")),
       );
       socket.addEventListener("close", () => {
-        if (!settled) finish(reject, new Error("Thread subscription closed before turn completion"));
+        if (!settled) {
+          recoverAfterDisconnect(new Error("Thread subscription closed before turn completion"));
+        }
       });
     });
   }
