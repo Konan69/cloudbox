@@ -158,6 +158,12 @@ UNIT
   corepack enable
   corepack prepare pnpm@11.10.0 --activate
 
+  # The host-side T3 server spawns the agent CLIs directly until the
+  # machine-per-thread overlay lands; they must exist on the host, not only
+  # in the golden image.
+  npm install -g ${HOST_AGENT_PACKAGES.join(" ")}
+  for tool in claude codex pi opencode; do command -v "$tool" >/dev/null; done
+
   # vite-plus installs to ~/.local/share/vite-plus/bin (older builds used ~/.vite-plus);
   # resolve it through the user's login PATH instead of assuming a location.
   if ! sudo -iu "$BOX_USER" bash -lc 'command -v vp' >/dev/null 2>&1; then
