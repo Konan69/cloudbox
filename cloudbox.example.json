@@ -16,6 +16,7 @@
       "~/.claude/settings.json",
       "~/.claude/CLAUDE.md",
       "~/.claude/skills/",
+      "~/.agents/skills/",
       "~/.claude/projects/-home-dev/memory/",
       "~/.pi/agent/auth.json",
       "~/.pi/agent/settings.json",
