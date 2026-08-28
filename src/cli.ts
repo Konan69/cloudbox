@@ -529,13 +529,21 @@ const smokeThreadCommand = Command.make("smoke-thread", {
     Flag.withDefault(false),
     Flag.withDescription("Leave the smoke project in the T3 environment after the run."),
   ),
+  machineMode: Flag.boolean("machine-mode").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription("Run smoke threads in project-scoped Incus machines."),
+  ),
 }).pipe(
   Command.withDescription("Run autonomous pi and Codex agent turns through the remote T3 server."),
-  Command.withHandler(({ host, keepProject, timeout }) =>
+  Command.withHandler(({ host, keepProject, machineMode, timeout }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig("cloudbox.json");
       const transport = yield* makeSshThreadSmokeTransport(config, host);
-      const report = yield* runThreadSmokeSuite(transport, { keepProject, timeoutSeconds: timeout });
+      const report = yield* runThreadSmokeSuite(transport, {
+        keepProject,
+        machineMode,
+        timeoutSeconds: timeout,
+      });
       yield* Console.log(formatThreadSmokeReport(report));
       if (!report.ok) {
         yield* Effect.sync(() => {

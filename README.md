@@ -175,7 +175,7 @@ pnpm cloudbox sync
 pnpm cloudbox sync --force
 pnpm cloudbox ssh
 pnpm cloudbox verify --host <ip> [--expect-vm] [--json]
-pnpm cloudbox smoke-thread --host <ip> [--timeout 240] [--keep-project]
+pnpm cloudbox smoke-thread --host <ip> [--timeout 240] [--keep-project] [--machine-mode]
 pnpm cloudbox verify-sleep [--timeout 1800] [--json]
 pnpm cloudbox verify-idle [--timeout 1800] [--json]
 ```
@@ -188,7 +188,7 @@ pnpm cloudbox verify-idle [--timeout 1800] [--json]
 | `sync` | Shows rsync names/stats per path. Real transfers run a dry-run size guard first; `--force` overrides `maxTransferMb`. |
 | `ssh` | Opens `ssh dev@<current-public-ip>`. |
 | `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
-| `smoke-thread` | Enables/configures pi through the environment API, runs autonomous pi and Codex turns, validates output, then deletes smoke threads and (unless `--keep-project`) the project. |
+| `smoke-thread` | Enables/configures pi, runs autonomous pi and Codex turns, and cleans up. `--machine-mode` also proves the Incus machine, ZFS workspace, in-machine hostname, and post-delete resource cleanup. |
 | `verify-sleep` | Sleeps and wakes through the configured provider, then proves uptime and a marker PID survived. |
 | `verify-idle` | Leaves the host untouched for `idleMinutes + 5` and verifies provider sleep. |
 

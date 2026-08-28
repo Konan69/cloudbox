@@ -2,7 +2,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Scope from "effect/Scope";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as Net from "node:net";
 
 import type { CloudboxConfig } from "../config.ts";
@@ -11,7 +11,19 @@ import { privateKeyPathFromConfig } from "./index.ts";
 const SMOKE_REPOSITORY = "/home/dev/smoke-repo";
 const T3_PORT = 3773;
 const SMOKE_PROMPT = "Reply with exactly: CLOUDBOX_SMOKE_OK and the output of uname -r";
+const MACHINE_SMOKE_PROMPT = `Run these commands inside your execution environment:
+hostname
+cat /etc/hostname
+ls /home/dev/ws
+
+Reply with exactly these four lines, replacing values with the command output:
+CLOUDBOX_MACHINE_SMOKE_OK
+hostname=<hostname output>
+etc_hostname=</etc/hostname output>
+workspace=<space-separated /home/dev/ws entries>`;
 const KERNEL_RELEASE_PATTERN = /\b\d+\.\d+\.\d+(?:[-.][0-9A-Za-z_+]+)+\b/;
+const MACHINE_NAME_PREFIX = "thread-";
+const MACHINE_NAME_MAX_LENGTH = 63;
 
 export class ThreadSmokeError extends Data.TaggedError("ThreadSmokeError")<{
   readonly operation: string;
@@ -42,11 +54,20 @@ export interface ThreadSmokeProvider {
 export interface ThreadSmokeProject {
   readonly id: string;
   readonly workspaceRoot: string;
+  readonly machineMode?: "off" | "thread";
 }
 
 export interface ThreadSmokeSnapshot {
   readonly snapshotSequence: number;
   readonly projects: ReadonlyArray<ThreadSmokeProject>;
+}
+
+export interface ThreadSmokeMachineBinding {
+  readonly machineId: string;
+  readonly machineName: string;
+  readonly state: string;
+  readonly hostWorkspaceRoot: string;
+  readonly guestWorkspaceRoot: string;
 }
 
 export interface ThreadSmokeThreadSnapshot {
@@ -55,6 +76,27 @@ export interface ThreadSmokeThreadSnapshot {
   readonly latestTurnState: string | null;
   readonly sessionStatus: string | null;
   readonly lastError: string | null;
+  readonly machine: ThreadSmokeMachineBinding | null;
+}
+
+export interface ThreadSmokeMachineObservation {
+  readonly machineName: string;
+  readonly instanceExists: boolean;
+  readonly instanceStatus: string;
+  readonly dataset: string;
+  readonly datasetExists: boolean;
+  readonly workspaceOwner: string;
+  readonly readmeExists: boolean;
+  readonly readmeFirstLine: string;
+}
+
+export interface ThreadSmokeMachineCleanupObservation {
+  readonly disposition: "destroyed" | "archived" | "incomplete";
+  readonly machineName: string;
+  readonly instanceExists: boolean;
+  readonly instanceStatus: string;
+  readonly dataset: string;
+  readonly datasetExists: boolean;
 }
 
 export interface ThreadSmokeTurnInput {
@@ -62,6 +104,7 @@ export interface ThreadSmokeTurnInput {
   readonly afterSequence: number;
   readonly command: Readonly<Record<string, unknown>>;
   readonly timeoutMs: number;
+  readonly onRunning?: () => Promise<void>;
 }
 
 export interface ThreadSmokeSettings {
@@ -78,6 +121,20 @@ export interface ThreadSmokeTransport {
   readonly readThread: (threadId: string) => Promise<ThreadSmokeThreadSnapshot>;
   readonly dispatch: (command: Readonly<Record<string, unknown>>) => Promise<void>;
   readonly runTurn: (input: ThreadSmokeTurnInput) => Promise<ThreadSmokeThreadSnapshot>;
+  readonly inspectMachine: (
+    threadId: string,
+    machineName: string,
+  ) => Promise<ThreadSmokeMachineObservation>;
+  readonly inspectMachineCleanup: (
+    threadId: string,
+    machineName: string,
+  ) => Promise<ThreadSmokeMachineCleanupObservation>;
+}
+
+export interface ThreadSmokeAssertion {
+  readonly name: string;
+  readonly pass: boolean;
+  readonly evidence: string;
 }
 
 export interface ThreadSmokeCaseResult {
@@ -88,6 +145,7 @@ export interface ThreadSmokeCaseResult {
   readonly assistantText: string;
   readonly evidence: string;
   readonly cleanup: "not-needed" | "deleted" | "failed";
+  readonly assertions: ReadonlyArray<ThreadSmokeAssertion>;
   readonly durationMs: number;
 }
 
@@ -97,12 +155,14 @@ export interface ThreadSmokeReport {
   readonly settingsActions: ReadonlyArray<string>;
   readonly projectId: string;
   readonly projectCleanup: "kept" | "deleted" | "failed";
+  readonly machineMode: "off" | "thread";
   readonly results: ReadonlyArray<ThreadSmokeCaseResult>;
 }
 
 export interface ThreadSmokeOptions {
   readonly timeoutSeconds?: number;
   readonly keepProject?: boolean;
+  readonly machineMode?: boolean;
 }
 
 interface ProviderCase {
@@ -117,6 +177,20 @@ const PROVIDER_CASES: ReadonlyArray<ProviderCase> = [
 
 const nowIso = (): string => new Date().toISOString();
 const makeId = (prefix: string): string => `${prefix}-${randomUUID()}`;
+
+export const machineNameForSmokeThread = (threadId: string): string => {
+  const sanitized = threadId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const plain = `${MACHINE_NAME_PREFIX}${sanitized || "id"}`;
+  if (plain.length <= MACHINE_NAME_MAX_LENGTH && sanitized === threadId) return plain;
+
+  const digest = createHash("sha256").update(threadId).digest("hex").slice(0, 12);
+  const available = MACHINE_NAME_MAX_LENGTH - MACHINE_NAME_PREFIX.length - digest.length - 1;
+  const prefix = sanitized.slice(0, available).replace(/-+$/g, "") || "id";
+  return `${MACHINE_NAME_PREFIX}${prefix}-${digest}`;
+};
 
 const providerUnavailableReason = (
   expected: ProviderCase,
@@ -145,9 +219,11 @@ const providerUnavailableReason = (
 
 const ensureSmokeProject = async (
   transport: ThreadSmokeTransport,
+  machineMode: boolean,
 ): Promise<string> => {
   const snapshot = await transport.readSnapshot();
   const existing = snapshot.projects.find((project) => project.workspaceRoot === SMOKE_REPOSITORY);
+  const desiredMachineMode = machineMode ? "thread" : "off";
   if (existing !== undefined) {
     await transport.dispatch({
       type: "project.meta.update",
@@ -155,6 +231,7 @@ const ensureSmokeProject = async (
       projectId: existing.id,
       title: "Cloudbox smoke repository",
       workspaceRoot: SMOKE_REPOSITORY,
+      machineMode: desiredMachineMode,
     });
     return existing.id;
   }
@@ -169,6 +246,14 @@ const ensureSmokeProject = async (
     createWorkspaceRootIfMissing: false,
     createdAt: nowIso(),
   });
+  if (machineMode) {
+    await transport.dispatch({
+      type: "project.meta.update",
+      commandId: makeId("cloudbox-smoke-project-machine-mode"),
+      projectId,
+      machineMode: "thread",
+    });
+  }
   return projectId;
 };
 
@@ -182,12 +267,65 @@ const validateAssistantText = (assistantText: string): string | undefined => {
   return undefined;
 };
 
+const machineField = (assistantText: string, name: string): string | undefined => {
+  const match = new RegExp(`^${name}\\s*=\\s*([^\\n\\r]+)$`, "im").exec(assistantText);
+  return match?.[1]?.trim().replace(/^`|`$/g, "");
+};
+
+const machineAssertions = (
+  threadId: string,
+  expectedName: string,
+  completed: ThreadSmokeThreadSnapshot,
+  observed: ThreadSmokeMachineObservation | undefined,
+  observationError: string | undefined,
+): ReadonlyArray<ThreadSmokeAssertion> => {
+  const binding = completed.machine;
+  const hostname = machineField(completed.assistantText, "hostname");
+  const etcHostname = machineField(completed.assistantText, "etc_hostname");
+  const workspace = machineField(completed.assistantText, "workspace");
+  return [
+    {
+      name: "machine binding",
+      pass: binding?.machineName === expectedName &&
+        binding.hostWorkspaceRoot === `/tank/threads/${threadId}/ws` &&
+        binding.guestWorkspaceRoot === "/home/dev/ws",
+      evidence: binding === null
+        ? "T3 thread snapshot had no machine binding."
+        : `${binding.machineName} state=${binding.state} host=${binding.hostWorkspaceRoot} guest=${binding.guestWorkspaceRoot}`,
+    },
+    {
+      name: "Incus runtime",
+      pass: observed?.instanceExists === true && observed.instanceStatus.toUpperCase() === "RUNNING",
+      evidence: observed === undefined
+        ? observationError ?? "No SSH machine observation was captured while the turn was running."
+        : `${observed.machineName} status=${observed.instanceStatus}`,
+    },
+    {
+      name: "ZFS workspace",
+      pass: observed?.datasetExists === true && observed.readmeExists,
+      evidence: observed === undefined
+        ? observationError ?? "No SSH dataset observation was captured while the turn was running."
+        : `${observed.dataset} exists=${String(observed.datasetExists)} owner=${observed.workspaceOwner} README=${String(observed.readmeExists)}${observed.readmeFirstLine.length > 0 ? ` (${observed.readmeFirstLine})` : ""}`,
+    },
+    {
+      name: "agent machine proof",
+      pass: completed.assistantText.includes("CLOUDBOX_MACHINE_SMOKE_OK") &&
+        hostname === expectedName &&
+        etcHostname === expectedName &&
+        hostname !== "cloudbox-test" &&
+        workspace?.split(/\\s+/).includes("README.md") === true,
+      evidence: `marker=${String(completed.assistantText.includes("CLOUDBOX_MACHINE_SMOKE_OK"))} hostname=${hostname ?? "missing"} etc_hostname=${etcHostname ?? "missing"} workspace=${workspace ?? "missing"}`,
+    },
+  ];
+};
+
 const runProviderCase = async (
   transport: ThreadSmokeTransport,
   providers: ReadonlyArray<ThreadSmokeProvider>,
   projectId: string,
   expected: ProviderCase,
   timeoutMs: number,
+  machineMode: boolean,
 ): Promise<ThreadSmokeCaseResult> => {
   const startedAt = Date.now();
   let threadId: string | null = null;
@@ -195,6 +333,9 @@ const runProviderCase = async (
   let pass = false;
   let evidence = "";
   let cleanup: ThreadSmokeCaseResult["cleanup"] = "not-needed";
+  const assertions: ThreadSmokeAssertion[] = [];
+  let machineObservation: ThreadSmokeMachineObservation | undefined;
+  let machineObservationError: string | undefined;
 
   try {
     const unavailable = providerUnavailableReason(expected, providers);
@@ -208,11 +349,13 @@ const runProviderCase = async (
         assistantText,
         evidence,
         cleanup,
+        assertions,
         durationMs: Date.now() - startedAt,
       };
     }
 
     threadId = makeId(`cloudbox-smoke-${expected.provider}`);
+    const expectedMachineName = machineNameForSmokeThread(threadId);
     const modelSelection = { instanceId: expected.provider, model: expected.model };
     await transport.dispatch({
       type: "thread.create",
@@ -233,6 +376,17 @@ const runProviderCase = async (
       threadId,
       afterSequence: initial.snapshotSequence,
       timeoutMs,
+      ...(machineMode
+        ? {
+            onRunning: async () => {
+              try {
+                machineObservation = await transport.inspectMachine(threadId!, expectedMachineName);
+              } catch (cause) {
+                machineObservationError = cause instanceof Error ? cause.message : String(cause);
+              }
+            },
+          }
+        : {}),
       command: {
         type: "thread.turn.start",
         commandId: makeId("cloudbox-smoke-turn-start"),
@@ -240,7 +394,7 @@ const runProviderCase = async (
         message: {
           messageId: makeId("cloudbox-smoke-message"),
           role: "user",
-          text: SMOKE_PROMPT,
+          text: machineMode ? MACHINE_SMOKE_PROMPT : SMOKE_PROMPT,
           attachments: [],
         },
         modelSelection,
@@ -254,6 +408,20 @@ const runProviderCase = async (
     if (completed.latestTurnState !== "completed") {
       evidence = completed.lastError ??
         `Turn ended in state=${completed.latestTurnState ?? "unknown"}, session=${completed.sessionStatus ?? "unknown"}.`;
+    } else if (machineMode) {
+      assertions.push(
+        ...machineAssertions(
+          threadId,
+          expectedMachineName,
+          completed,
+          machineObservation,
+          machineObservationError,
+        ),
+      );
+      pass = assertions.every((assertion) => assertion.pass);
+      evidence = pass
+        ? "Agent turn and all in-machine assertions passed."
+        : "Agent turn completed, but one or more in-machine assertions failed.";
     } else {
       const validationError = validateAssistantText(assistantText);
       if (validationError !== undefined) {
@@ -265,8 +433,38 @@ const runProviderCase = async (
     }
   } catch (cause) {
     evidence = cause instanceof Error ? cause.message : String(cause);
+    if (machineMode && threadId !== null && assertions.length === 0) {
+      const expectedMachineName = machineNameForSmokeThread(threadId);
+      try {
+        machineObservation ??= await transport.inspectMachine(threadId, expectedMachineName);
+      } catch (observationCause) {
+        machineObservationError ??= observationCause instanceof Error
+          ? observationCause.message
+          : String(observationCause);
+      }
+      try {
+        const failedSnapshot = await transport.readThread(threadId);
+        assistantText = failedSnapshot.assistantText;
+        assertions.push(
+          ...machineAssertions(
+            threadId,
+            expectedMachineName,
+            failedSnapshot,
+            machineObservation,
+            machineObservationError,
+          ),
+        );
+      } catch (snapshotCause) {
+        assertions.push({
+          name: "machine binding",
+          pass: false,
+          evidence: snapshotCause instanceof Error ? snapshotCause.message : String(snapshotCause),
+        });
+      }
+    }
   } finally {
     if (threadId !== null) {
+      const expectedMachineName = machineNameForSmokeThread(threadId);
       try {
         await transport.dispatch({
           type: "thread.delete",
@@ -274,11 +472,30 @@ const runProviderCase = async (
           threadId,
         });
         cleanup = "deleted";
+        if (machineMode) {
+          const observed = await transport.inspectMachineCleanup(threadId, expectedMachineName);
+          const cleanupPass = observed.disposition === "destroyed" || observed.disposition === "archived";
+          const passedBeforeCleanup = pass;
+          assertions.push({
+            name: "machine cleanup",
+            pass: cleanupPass,
+            evidence: `${observed.disposition}: ${observed.machineName} exists=${String(observed.instanceExists)} status=${observed.instanceStatus}; ${observed.dataset} exists=${String(observed.datasetExists)}`,
+          });
+          pass = pass && cleanupPass;
+          if (!cleanupPass && passedBeforeCleanup) {
+            evidence = "Agent turn passed, but machine cleanup remained incomplete.";
+          } else if (pass) {
+            evidence = "Agent turn, in-machine assertions, and machine cleanup all passed.";
+          }
+        }
       } catch (cause) {
         cleanup = "failed";
         pass = false;
         const detail = cause instanceof Error ? cause.message : String(cause);
         evidence = `${evidence} Cleanup failed: ${detail}`.trim();
+        if (machineMode) {
+          assertions.push({ name: "machine cleanup", pass: false, evidence: detail });
+        }
       }
     }
   }
@@ -291,6 +508,7 @@ const runProviderCase = async (
     assistantText,
     evidence,
     cleanup,
+    assertions,
     durationMs: Date.now() - startedAt,
   };
 };
@@ -360,11 +578,14 @@ export const runThreadSmokeSuite = (
         settingsActions.push(`retrying pi provider refresh after: ${piReason}`);
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
-      const projectId = await ensureSmokeProject(transport);
+      const machineMode = options.machineMode === true;
+      const projectId = await ensureSmokeProject(transport, machineMode);
       const results: ThreadSmokeCaseResult[] = [];
       const timeoutMs = (options.timeoutSeconds ?? 240) * 1_000;
       for (const expected of PROVIDER_CASES) {
-        results.push(await runProviderCase(transport, providers, projectId, expected, timeoutMs));
+        results.push(
+          await runProviderCase(transport, providers, projectId, expected, timeoutMs, machineMode),
+        );
       }
 
       let projectCleanup: ThreadSmokeReport["projectCleanup"] = "kept";
@@ -391,6 +612,7 @@ export const runThreadSmokeSuite = (
         settingsActions,
         projectId,
         projectCleanup,
+        machineMode: machineMode ? "thread" : "off",
         results,
       } satisfies ThreadSmokeReport;
     },
@@ -402,6 +624,7 @@ export const formatThreadSmokeReport = (report: ThreadSmokeReport): string => {
     `environment: ${report.environmentId}`,
     ...report.settingsActions.map((action) => `settings: ${action}`),
     `project: ${report.projectId}`,
+    `machine mode: ${report.machineMode}`,
     `project cleanup: ${report.projectCleanup}`,
   ];
   const cases = report.results.map((result) => {
@@ -412,6 +635,9 @@ export const formatThreadSmokeReport = (report: ThreadSmokeReport): string => {
       `cleanup: ${result.cleanup}`,
       `evidence: ${result.evidence}`,
     ];
+    for (const assertion of result.assertions) {
+      lines.push(`assert ${assertion.name}: ${assertion.pass ? "PASS" : "FAIL"} — ${assertion.evidence}`);
+    }
     if (result.assistantText.length > 0) {
       lines.push("assistant:", result.assistantText);
     }
@@ -567,11 +793,21 @@ const asString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
 class LiveThreadSmokeTransport implements ThreadSmokeTransport {
+  readonly #config: CloudboxConfig;
+  readonly #host: string;
   readonly #origin: string;
   readonly #token: string;
   readonly #tunnel: ChildProcessWithoutNullStreams;
 
-  constructor(origin: string, token: string, tunnel: ChildProcessWithoutNullStreams) {
+  constructor(
+    config: CloudboxConfig,
+    host: string,
+    origin: string,
+    token: string,
+    tunnel: ChildProcessWithoutNullStreams,
+  ) {
+    this.#config = config;
+    this.#host = host;
     this.#origin = origin;
     this.#token = token;
     this.#tunnel = tunnel;
@@ -589,6 +825,28 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
       });
       this.#tunnel.kill("SIGTERM");
     });
+  }
+
+  async #remoteJson(
+    operation: string,
+    script: string,
+    args: ReadonlyArray<string>,
+    timeoutMs = 30_000,
+  ): Promise<Record<string, unknown>> {
+    const output = await runCaptured(
+      "ssh",
+      [...sshArgs(this.#config, this.#host), "bash", "-s", "--", ...args],
+      script,
+      timeoutMs,
+    );
+    if (output.exitCode !== 0) {
+      throw smokeError(operation, output.stderr.trim() || `ssh exited ${String(output.exitCode)}`);
+    }
+    try {
+      return asRecord(JSON.parse(output.stdout.trim()) as unknown, operation);
+    } catch (cause) {
+      throw smokeError(operation, `Host returned invalid JSON: ${output.stdout.trim()}`, cause);
+    }
   }
 
   async #jsonRequest(path: string, init: RequestInit = {}): Promise<unknown> {
@@ -721,6 +979,112 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
     await this.#rpcUnary("server.updateSettings", { patch });
   }
 
+  async inspectMachine(
+    threadId: string,
+    machineName: string,
+  ): Promise<ThreadSmokeMachineObservation> {
+    const value = await this.#remoteJson(
+      "inspect thread machine",
+      `set -u
+thread_id=$1
+machine_name=$2
+dataset="tank/threads/$thread_id/ws"
+workspace="/tank/threads/$thread_id/ws"
+rows=$(incus list "$machine_name" --format json 2>/dev/null || printf '[]')
+instance_exists=$(printf '%s' "$rows" | jq 'length > 0')
+instance_status=$(printf '%s' "$rows" | jq -r '.[0].status // "MISSING"')
+if sudo -n zfs list -H -o name "$dataset" >/dev/null 2>&1; then dataset_exists=true; else dataset_exists=false; fi
+if [ -e "$workspace" ]; then workspace_owner=$(stat -c '%u:%g' "$workspace"); else workspace_owner=MISSING; fi
+if [ -f "$workspace/README.md" ]; then
+  readme_exists=true
+  readme_first_line=$(head -n 1 "$workspace/README.md")
+else
+  readme_exists=false
+  readme_first_line=''
+fi
+jq -nc \
+  --arg machineName "$machine_name" \
+  --argjson instanceExists "$instance_exists" \
+  --arg instanceStatus "$instance_status" \
+  --arg dataset "$dataset" \
+  --argjson datasetExists "$dataset_exists" \
+  --arg workspaceOwner "$workspace_owner" \
+  --argjson readmeExists "$readme_exists" \
+  --arg readmeFirstLine "$readme_first_line" \
+  '{machineName:$machineName,instanceExists:$instanceExists,instanceStatus:$instanceStatus,dataset:$dataset,datasetExists:$datasetExists,workspaceOwner:$workspaceOwner,readmeExists:$readmeExists,readmeFirstLine:$readmeFirstLine}'
+`,
+      [threadId, machineName],
+    );
+    return {
+      machineName: asString(value.machineName) ?? machineName,
+      instanceExists: value.instanceExists === true,
+      instanceStatus: asString(value.instanceStatus) ?? "UNKNOWN",
+      dataset: asString(value.dataset) ?? `tank/threads/${threadId}/ws`,
+      datasetExists: value.datasetExists === true,
+      workspaceOwner: asString(value.workspaceOwner) ?? "UNKNOWN",
+      readmeExists: value.readmeExists === true,
+      readmeFirstLine: asString(value.readmeFirstLine) ?? "",
+    };
+  }
+
+  async inspectMachineCleanup(
+    threadId: string,
+    machineName: string,
+  ): Promise<ThreadSmokeMachineCleanupObservation> {
+    const value = await this.#remoteJson(
+      "inspect thread machine cleanup",
+      `set -u
+thread_id=$1
+machine_name=$2
+dataset="tank/threads/$thread_id/ws"
+instance_exists=true
+instance_status=UNKNOWN
+dataset_exists=true
+for _ in $(seq 1 60); do
+  rows=$(incus list "$machine_name" --format json 2>/dev/null || printf '[]')
+  if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
+    instance_exists=false
+    instance_status=MISSING
+  else
+    instance_exists=true
+    instance_status=$(printf '%s' "$rows" | jq -r '.[0].status // "UNKNOWN"')
+  fi
+  if sudo -n zfs list -H -o name "$dataset" >/dev/null 2>&1; then dataset_exists=true; else dataset_exists=false; fi
+  if [ "$instance_exists" = false ] && [ "$dataset_exists" = false ]; then break; fi
+  sleep 0.5
+done
+if [ "$instance_exists" = false ] && [ "$dataset_exists" = false ]; then
+  disposition=destroyed
+elif [ "$instance_exists" = true ] && [ "\${instance_status^^}" != RUNNING ] && [ "$dataset_exists" = true ]; then
+  disposition=archived
+else
+  disposition=incomplete
+fi
+jq -nc \
+  --arg disposition "$disposition" \
+  --arg machineName "$machine_name" \
+  --argjson instanceExists "$instance_exists" \
+  --arg instanceStatus "$instance_status" \
+  --arg dataset "$dataset" \
+  --argjson datasetExists "$dataset_exists" \
+  '{disposition:$disposition,machineName:$machineName,instanceExists:$instanceExists,instanceStatus:$instanceStatus,dataset:$dataset,datasetExists:$datasetExists}'
+`,
+      [threadId, machineName],
+      45_000,
+    );
+    const disposition = asString(value.disposition);
+    return {
+      disposition: disposition === "destroyed" || disposition === "archived"
+        ? disposition
+        : "incomplete",
+      machineName: asString(value.machineName) ?? machineName,
+      instanceExists: value.instanceExists === true,
+      instanceStatus: asString(value.instanceStatus) ?? "UNKNOWN",
+      dataset: asString(value.dataset) ?? `tank/threads/${threadId}/ws`,
+      datasetExists: value.datasetExists === true,
+    };
+  }
+
   async refreshProviders(): Promise<ReadonlyArray<ThreadSmokeProvider>> {
     const result = asRecord(await this.#rpcUnary("server.refreshProviders", {}), "refresh providers");
     if (!Array.isArray(result.providers)) {
@@ -767,9 +1131,11 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
       snapshotSequence: value.snapshotSequence,
       projects: value.projects.map((projectValue) => {
         const project = asRecord(projectValue, "orchestration project");
+        const machineMode = asString(project.machineMode);
         return {
           id: asString(project.id) ?? "",
           workspaceRoot: asString(project.workspaceRoot) ?? "",
+          ...(machineMode === "off" || machineMode === "thread" ? { machineMode } : {}),
         };
       }),
     };
@@ -792,6 +1158,18 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
     const session = thread.session === null || thread.session === undefined
       ? undefined
       : asRecord(thread.session, "thread session");
+    const machineValue = thread.machine === null || thread.machine === undefined
+      ? undefined
+      : asRecord(thread.machine, "thread machine binding");
+    const machine = machineValue === undefined
+      ? null
+      : {
+          machineId: asString(machineValue.machineId) ?? "",
+          machineName: asString(machineValue.machineName) ?? "",
+          state: asString(machineValue.state) ?? "unknown",
+          hostWorkspaceRoot: asString(machineValue.hostWorkspaceRoot) ?? "",
+          guestWorkspaceRoot: asString(machineValue.guestWorkspaceRoot) ?? "",
+        } satisfies ThreadSmokeMachineBinding;
     if (typeof value.snapshotSequence !== "number") {
       throw smokeError("thread snapshot", "T3 returned no snapshot sequence.");
     }
@@ -801,6 +1179,7 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
       latestTurnState: asString(latestTurn?.state) ?? null,
       sessionStatus: asString(session?.status) ?? null,
       lastError: asString(session?.lastError) ?? null,
+      machine,
     };
   }
 
@@ -852,6 +1231,7 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
       let settled = false;
       let started = false;
       let sawRunning = false;
+      let ranRunningObserver = false;
       let recovering = false;
       let processing = Promise.resolve();
       const timer = setTimeout(
@@ -891,6 +1271,10 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
         const status = asString(session.status) ?? "unknown";
         if (status === "running") {
           sawRunning = true;
+          if (!ranRunningObserver && input.onRunning !== undefined) {
+            ranRunningObserver = true;
+            await input.onRunning();
+          }
           return;
         }
         if (!sawRunning || !["ready", "error", "interrupted", "stopped"].includes(status)) return;
@@ -965,7 +1349,7 @@ const acquireLiveTransport = async (
   );
   try {
     await waitForTunnel(origin, tunnel);
-    return new LiveThreadSmokeTransport(origin, token, tunnel);
+    return new LiveThreadSmokeTransport(config, host, origin, token, tunnel);
   } catch (cause) {
     tunnel.kill("SIGTERM");
     throw smokeError("open T3 SSH tunnel", "Could not reach the T3 server through SSH.", cause);

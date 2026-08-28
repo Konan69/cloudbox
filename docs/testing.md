@@ -22,7 +22,7 @@ It runs typechecking, tests, and the static bootstrap check. It does not run Doc
 node dist/cli.mjs verify --host 203.0.113.42
 node dist/cli.mjs verify --host 203.0.113.42 --expect-vm
 node dist/cli.mjs verify --host 203.0.113.42 --json
-node dist/cli.mjs smoke-thread --host 203.0.113.42 [--keep-project]
+node dist/cli.mjs smoke-thread --host 203.0.113.42 [--keep-project] [--machine-mode]
 node dist/cli.mjs verify-sleep --timeout 1800
 node dist/cli.mjs verify-idle --timeout 1800
 ```
@@ -33,17 +33,22 @@ node dist/cli.mjs verify-idle --timeout 1800
 
 ```bash
 pnpm build:cli
-node dist/cli.mjs smoke-thread --host 203.0.113.42 --timeout 240 [--keep-project]
+node dist/cli.mjs smoke-thread --host 203.0.113.42 --timeout 240 [--keep-project] [--machine-mode]
 ```
 
 The command prepares `/home/dev/smoke-repo` over SSH, opens an SSH tunnel to the loopback-only T3 server, and reads the existing automation bearer. It prints the environment ID and reads environment-owned settings with `server.getSettings`. When pi is disabled, it uses `server.updateSettings` to add an enabled `pi` provider instance with default model `openai-codex/gpt-5.6-sol`, and logs `enabled provider pi in environment settings`. It then refreshes the provider catalog and runs separate `pi` (`openai-codex/gpt-5.6-sol`) and `codex` (`gpt-5.6-sol`) cases. Each case prints its own PASS/FAIL, thread ID, and assistant text.
 
 Every created smoke thread is deleted, including failed cases. The smoke project is deleted by default; `--keep-project` preserves the earlier behavior of leaving it in the environment.
 
+`--machine-mode` updates the smoke project with `machineMode: "thread"` before creating threads. For each provider, it waits for the streamed session state to become `running`, then checks over SSH that the deterministic `thread-…` Incus instance is `RUNNING`, `tank/threads/<thread-id>/ws` exists, and its mounted workspace contains `README.md`. The agent must report `hostname`, `/etc/hostname`, and `/home/dev/ws`; the smoke requires both hostnames to equal the Incus machine name, rejects `cloudbox-test`, and requires the workspace listing to contain `README.md`. After `thread.delete`, it reports whether the instance and dataset were destroyed or retained in the overlay's archived state. Each assertion prints its own PASS/FAIL and evidence.
+
 The implementation follows these contracts from dev's fork:
 
 - `packages/contracts/src/environmentHttp.ts:434-438,500-530` defines bearer-authenticated WebSocket-ticket issuance plus orchestration snapshot, thread snapshot, and dispatch HTTP routes.
-- `packages/contracts/src/orchestration.ts:704-758,894-932` defines `project.create`, `project.meta.update`, `project.delete`, `thread.create`, `thread.delete`, and `thread.turn.start` payloads.
+- `packages/contracts/src/orchestration.ts:287-310,454-465,731-760` defines project `machineMode`, persisted thread machine bindings, and the `project.meta.update` command used to enable machine mode, alongside the existing project/thread lifecycle commands.
+- `apps/server/src/machine/MachineService.ts:20-43` defines the deterministic machine name and `/tank/threads/<thread-id>/ws` host workspace. `apps/server/src/machine/IncusMachineService.ts:184-323` provisions the ZFS dataset and golden Incus machine and mounts it at `/home/dev/ws`.
+- `apps/server/src/orchestration/Layers/ThreadDeletionReactor.ts:40-57,90-103` removes the machine worktree and calls `MachineService.destroy`; the current implementation removes both the instance and ZFS dataset. The smoke also accepts the documented stopped-instance/dataset-retained archived policy and reports which disposition occurred.
+- `packages/contracts/src/orchestration.ts:720-760,910-948` defines `project.create`, `project.meta.update`, `project.delete`, `thread.create`, `thread.delete`, and `thread.turn.start` payloads.
 - `packages/contracts/src/rpc.ts:281-282,396-405` defines `server.getSettings` and `server.updateSettings`; `apps/server/src/ws.ts:1691-1709` reads, updates, and returns redacted environment settings.
 - `packages/contracts/src/settings.ts:553-615,753-768,913-960` defines pi settings (`enabled`, `defaultModel`, provider filtering, launch configuration) and the whole-map `providerInstances` update boundary. The smoke preserves the returned map and adds/updates only the `pi` instance envelope.
 - `packages/contracts/src/orchestration.ts:53-70` makes `modelSelection.instanceId` the provider-instance routing key; the model is the provider-specific slug. The smoke therefore uses instance IDs `pi` and `codex` and never falls back from pi.

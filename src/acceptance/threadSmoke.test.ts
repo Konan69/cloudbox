@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 
 import {
   formatThreadSmokeReport,
+  machineNameForSmokeThread,
   runThreadSmokeSuite,
   type ThreadSmokeProject,
   type ThreadSmokeProvider,
@@ -26,18 +27,31 @@ const provider = (
   ...overrides,
 });
 
-const completedThread = (assistantText: string): ThreadSmokeThreadSnapshot => ({
+const completedThread = (
+  assistantText: string,
+  threadId?: string,
+): ThreadSmokeThreadSnapshot => ({
   snapshotSequence: 12,
   assistantText,
   latestTurnState: "completed",
   sessionStatus: "ready",
   lastError: null,
+  machine: threadId === undefined
+    ? null
+    : {
+        machineId: machineNameForSmokeThread(threadId),
+        machineName: machineNameForSmokeThread(threadId),
+        state: "running",
+        hostWorkspaceRoot: `/tank/threads/${threadId}/ws`,
+        guestWorkspaceRoot: "/home/dev/ws",
+      },
 });
 
 const makeFakeTransport = (input?: {
   readonly providers?: ReadonlyArray<ThreadSmokeProvider>;
   readonly assistantText?: string;
   readonly piEnabled?: boolean;
+  readonly machineMode?: boolean;
 }) => {
   const commands: Array<Readonly<Record<string, unknown>>> = [];
   const settingsUpdates: Array<Readonly<Record<string, unknown>>> = [];
@@ -64,7 +78,14 @@ const makeFakeTransport = (input?: {
       projects.push({
         id: String(command.projectId),
         workspaceRoot: String(command.workspaceRoot),
+        machineMode: "off",
       });
+    }
+    if (command.type === "project.meta.update" && command.machineMode !== undefined) {
+      const project = projects.find((entry) => entry.id === command.projectId);
+      if (project !== undefined) {
+        Object.assign(project, { machineMode: command.machineMode });
+      }
     }
   };
 
@@ -91,12 +112,39 @@ const makeFakeTransport = (input?: {
       latestTurnState: null,
       sessionStatus: null,
       lastError: null,
+      machine: null,
     }),
     dispatch,
     runTurn: async (turn: ThreadSmokeTurnInput) => {
       await dispatch(turn.command);
+      await turn.onRunning?.();
+      if (input?.machineMode === true) {
+        const machineName = machineNameForSmokeThread(turn.threadId);
+        return completedThread(
+          `CLOUDBOX_MACHINE_SMOKE_OK\nhostname=${machineName}\netc_hostname=${machineName}\nworkspace=README.md`,
+          turn.threadId,
+        );
+      }
       return completedThread(assistantText);
     },
+    inspectMachine: async (threadId, machineName) => ({
+      machineName,
+      instanceExists: true,
+      instanceStatus: "RUNNING",
+      dataset: `tank/threads/${threadId}/ws`,
+      datasetExists: true,
+      workspaceOwner: "1001:1002",
+      readmeExists: true,
+      readmeFirstLine: "# Cloudbox smoke repository",
+    }),
+    inspectMachineCleanup: async (threadId, machineName) => ({
+      disposition: "destroyed",
+      machineName,
+      instanceExists: false,
+      instanceStatus: "MISSING",
+      dataset: `tank/threads/${threadId}/ws`,
+      datasetExists: false,
+    }),
   };
 
   return { commands, settingsUpdates, transport };
@@ -170,6 +218,37 @@ describe("T3 thread smoke", () => {
       expect(formatThreadSmokeReport(report)).toContain(
         "settings: enabled provider pi in environment settings",
       );
+    });
+  });
+
+  it.effect("proves machine resources, agent hostname, and deletion cleanup", () => {
+    const fake = makeFakeTransport({ machineMode: true });
+    return Effect.gen(function* () {
+      const report = yield* runThreadSmokeSuite(fake.transport, {
+        keepProject: true,
+        machineMode: true,
+      });
+
+      expect(report.ok).toBe(true);
+      expect(fake.commands).toContainEqual(expect.objectContaining({
+        type: "project.meta.update",
+        machineMode: "thread",
+      }));
+      expect(report.results).toHaveLength(2);
+      for (const result of report.results) {
+        expect(result.pass).toBe(true);
+        expect(result.assertions.map((assertion) => [assertion.name, assertion.pass])).toEqual([
+          ["machine binding", true],
+          ["Incus runtime", true],
+          ["ZFS workspace", true],
+          ["agent machine proof", true],
+          ["machine cleanup", true],
+        ]);
+      }
+      const output = formatThreadSmokeReport(report);
+      expect(output).toContain("assert Incus runtime: PASS");
+      expect(output).toContain("assert machine cleanup: PASS — destroyed");
+      expect(output).toContain("CLOUDBOX_MACHINE_SMOKE_OK");
     });
   });
 
