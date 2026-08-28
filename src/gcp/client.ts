@@ -41,6 +41,7 @@ export type OperationScope = { readonly zone: string } | "global";
 
 export const GoogleLongRunningOperation = Schema.Struct({
   name: Schema.NonEmptyString,
+  metadata: Schema.optional(Schema.Unknown),
   done: Schema.optional(Schema.Boolean),
   error: Schema.optional(
     Schema.Struct({ code: Schema.optional(Schema.Number), message: Schema.optional(Schema.String) }),
@@ -49,6 +50,9 @@ export const GoogleLongRunningOperation = Schema.Struct({
 });
 
 export type GoogleLongRunningOperation = typeof GoogleLongRunningOperation.Type;
+
+export const googleOperationPath = (name: string): string =>
+  `/${name.replace(/^\/+/u, "")}`;
 
 export class GcpAuthError extends Data.TaggedError("GcpAuthError")<{
   readonly message: string;
@@ -342,7 +346,7 @@ export class GcpApi {
         }
         operation = yield* self.request(
           `wait for operation ${operation.name}`,
-          `/${operation.name.split("/").map(encodeURIComponent).join("/")}`,
+          googleOperationPath(operation.name),
           GoogleLongRunningOperation,
           { baseUrl },
         );

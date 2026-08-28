@@ -10,12 +10,17 @@ import {
 } from "./client.ts";
 
 describe("GcpApi operation polling", () => {
-  it.effect("polls Google long-running operations on the product API", () =>
+  it.effect("polls and decodes a regional Cloud Build operation at its exact v1 URL", () =>
     Effect.gen(function* () {
       const requests: string[] = [];
+      const operationName = "projects/cloudbox-project/locations/europe-west2/operations/op-1";
       const fakeFetch: typeof fetch = async (input) => {
         requests.push(String(input));
-        return Response.json({ name: "projects/p/locations/europe-west2/operations/op-1", done: true });
+        return Response.json({
+          name: operationName,
+          metadata: { build: { id: "edae1780-48ea-4974-9a7c-a528254552b9" } },
+          done: true,
+        });
       };
       const api = new GcpApi({
         project: "cloudbox-project",
@@ -25,13 +30,16 @@ describe("GcpApi operation polling", () => {
       });
 
       const operation = yield* api.waitForGoogleOperation(
-        { name: "projects/p/locations/europe-west2/operations/op-1" },
-        "https://run.googleapis.com/v2",
+        { name: operationName },
+        "https://cloudbuild.googleapis.com/v1",
       );
 
       expect(operation.done).toBe(true);
+      expect(operation.metadata).toEqual({
+        build: { id: "edae1780-48ea-4974-9a7c-a528254552b9" },
+      });
       expect(requests).toEqual([
-        "https://run.googleapis.com/v2/projects/p/locations/europe-west2/operations/op-1",
+        "https://cloudbuild.googleapis.com/v1/projects/cloudbox-project/locations/europe-west2/operations/op-1",
       ]);
     }),
   );

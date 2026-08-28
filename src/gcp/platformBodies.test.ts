@@ -9,10 +9,42 @@ import {
   buildSecretBody,
   buildStorageBucketBody,
 } from "./platformBodies.ts";
-import { GcpProjectResponse } from "./platform.ts";
+import { GoogleLongRunningOperation } from "./client.ts";
+import {
+  cloudBuildIdFromOperation,
+  cloudBuildResponseFromOperation,
+  GcpProjectResponse,
+} from "./platform.ts";
 import { makeWakeSourceArchive } from "./sourceArchive.ts";
 
 describe("GCP wake platform request bodies", () => {
+  it("decodes Cloud Build completion and metadata build fallback", () => {
+    const metadataOnly = Schema.decodeUnknownSync(GoogleLongRunningOperation)({
+      name: "projects/cloudbox-project/locations/europe-west2/operations/op-1",
+      metadata: { build: { id: "edae1780-48ea-4974-9a7c-a528254552b9" } },
+      done: true,
+    });
+    const withResponse = Schema.decodeUnknownSync(GoogleLongRunningOperation)({
+      name: "projects/cloudbox-project/locations/europe-west2/operations/op-2",
+      done: true,
+      response: {
+        build: {
+          id: "cfb857ba-0000-4000-8000-000000000000",
+          status: "SUCCESS",
+        },
+      },
+    });
+
+    expect(cloudBuildIdFromOperation(metadataOnly)).toBe(
+      "edae1780-48ea-4974-9a7c-a528254552b9",
+    );
+    expect(cloudBuildResponseFromOperation(metadataOnly)).toBeUndefined();
+    expect(cloudBuildResponseFromOperation(withResponse)).toMatchObject({
+      id: "cfb857ba-0000-4000-8000-000000000000",
+      status: "SUCCESS",
+    });
+  });
+
   it("decodes the canonical project number from Resource Manager", () => {
     expect(
       Schema.decodeUnknownSync(GcpProjectResponse)({

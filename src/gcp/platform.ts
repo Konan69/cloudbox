@@ -57,7 +57,25 @@ const RepositoryResponse = Schema.Struct({
 const BuildResponse = Schema.Struct({
   id: Schema.NonEmptyString,
   status: Schema.NonEmptyString,
+  images: Schema.optional(Schema.Array(Schema.String)),
+  source: Schema.optional(
+    Schema.Struct({
+      storageSource: Schema.optional(
+        Schema.Struct({
+          bucket: Schema.optional(Schema.String),
+          object: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
 });
+const BuildListResponse = Schema.Struct({
+  builds: Schema.optional(Schema.Array(BuildResponse)),
+});
+const CloudBuildOperationMetadata = Schema.Struct({
+  build: Schema.Struct({ id: Schema.NonEmptyString }),
+});
+const CloudBuildWrappedResponse = Schema.Struct({ build: BuildResponse });
 const SecretResponse = Schema.Struct({
   name: Schema.NonEmptyString,
   labels: Schema.optional(Labels),
@@ -462,6 +480,91 @@ export const GcpArtifactRepositoryProvider = (api: GcpApi) =>
 
 const buildPath = (project: string, location: string, id: string) =>
   `/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/builds/${encodeURIComponent(id)}`;
+const buildsPath = (project: string, location: string) =>
+  `/projects/${encodeURIComponent(project)}/locations/${encodeURIComponent(location)}/builds`;
+
+export const cloudBuildIdFromOperation = (
+  operation: GoogleLongRunningOperation,
+): string | undefined => {
+  try {
+    return Schema.decodeUnknownSync(CloudBuildOperationMetadata)(operation.metadata).build.id;
+  } catch {
+    return undefined;
+  }
+};
+
+export const cloudBuildResponseFromOperation = (
+  operation: GoogleLongRunningOperation,
+): typeof BuildResponse.Type | undefined => {
+  try {
+    return Schema.decodeUnknownSync(BuildResponse)(operation.response);
+  } catch {
+    try {
+      return Schema.decodeUnknownSync(CloudBuildWrappedResponse)(operation.response).build;
+    } catch {
+      return undefined;
+    }
+  }
+};
+
+const terminalBuildStatuses = new Set([
+  "SUCCESS",
+  "FAILURE",
+  "INTERNAL_ERROR",
+  "TIMEOUT",
+  "CANCELLED",
+  "EXPIRED",
+]);
+
+const getBuild = (
+  api: GcpApi,
+  project: string,
+  location: string,
+  id: string,
+) => api.requestOptional(
+  `get build ${id}`,
+  buildPath(project, location, id),
+  BuildResponse,
+  { baseUrl: CLOUD_BUILD_API },
+);
+
+const waitForBuild = (
+  api: GcpApi,
+  project: string,
+  location: string,
+  id: string,
+) => Effect.gen(function* () {
+  for (let poll = 0; poll < 600; poll += 1) {
+    const build = yield* getBuild(api, project, location, id);
+    if (build !== undefined && terminalBuildStatuses.has(build.status)) return build;
+    yield* Effect.sleep(Duration.seconds(1));
+  }
+  return yield* Effect.fail(
+    new GcpPlatformResourceError({
+      resource: id,
+      message: "Cloud Build did not reach a terminal state within 10 minutes",
+    }),
+  );
+});
+
+const findSuccessfulBuild = (
+  api: GcpApi,
+  props: GcpCloudBuildProps,
+) => Effect.gen(function* () {
+  const response = yield* api.request(
+    "list existing wake service builds",
+    `${buildsPath(props.project, props.location)}?pageSize=100`,
+    BuildListResponse,
+    { baseUrl: CLOUD_BUILD_API },
+  );
+  return response.builds?.find((build) =>
+    build.status === "SUCCESS" &&
+    build.images?.includes(props.imageUri) === true &&
+    build.source?.storageSource?.bucket === props.bucketName &&
+    build.source.storageSource.object === props.objectName
+  );
+});
+
 export const GcpCloudBuildProvider = (api: GcpApi) =>
   Provider.succeed(GcpCloudBuild, {
     stables: ["buildId", "imageUri"],
@@ -473,26 +576,58 @@ export const GcpCloudBuildProvider = (api: GcpApi) =>
         : { action: "replace", deleteFirst: false } as const;
     }),
     read: Effect.fn(function* ({ olds, output }) {
-      if (olds === undefined || output === undefined) return undefined;
-      const build = yield* api.requestOptional(`get build ${output.buildId}`, buildPath(olds.project, olds.location, output.buildId), BuildResponse, { baseUrl: CLOUD_BUILD_API });
-      return build?.status === "SUCCESS" ? { buildId: build.id, imageUri: output.imageUri, status: build.status } : undefined;
+      if (olds === undefined) return undefined;
+      if (
+        output?.status === "SUCCESS" &&
+        output.imageUri === olds.imageUri
+      ) return output;
+      if (output !== undefined) {
+        const build = yield* getBuild(api, olds.project, olds.location, output.buildId);
+        if (build?.status === "SUCCESS") {
+          return { buildId: build.id, imageUri: olds.imageUri, status: build.status };
+        }
+      }
+      const adopted = yield* findSuccessfulBuild(api, olds);
+      return adopted === undefined
+        ? undefined
+        : { buildId: adopted.id, imageUri: olds.imageUri, status: adopted.status };
     }),
     reconcile: Effect.fn(function* ({ news }) {
+      const adopted = yield* findSuccessfulBuild(api, news);
+      if (adopted !== undefined) {
+        return { buildId: adopted.id, imageUri: news.imageUri, status: adopted.status };
+      }
       const operation = yield* api.request(
         "build wake service image",
-        `/projects/${encodeURIComponent(news.project)}/locations/${encodeURIComponent(news.location)}/builds`,
+        buildsPath(news.project, news.location),
         GoogleLongRunningOperation,
         { method: "POST", body: JSON.stringify(buildCloudBuildBody(news)), baseUrl: CLOUD_BUILD_API },
       );
-      const completed = yield* api.waitForGoogleOperation(operation, CLOUD_BUILD_API);
-      const build = yield* Schema.decodeUnknownEffect(BuildResponse)(completed.response).pipe(
-        Effect.mapError(() =>
-          new GcpPlatformResourceError({
-            resource: completed.name,
-            message: "Cloud Build operation returned no build response",
-          }),
+      const initialBuildId = cloudBuildIdFromOperation(operation);
+      const completed = yield* api.waitForGoogleOperation(operation, CLOUD_BUILD_API).pipe(
+        Effect.catchTag("GcpApiError", (error) =>
+          error.status === 404 && initialBuildId !== undefined
+            ? Effect.succeed(undefined)
+            : Effect.fail(error),
         ),
       );
+      let build = completed === undefined
+        ? undefined
+        : cloudBuildResponseFromOperation(completed);
+      if (build === undefined) {
+        const buildId = (completed === undefined
+          ? undefined
+          : cloudBuildIdFromOperation(completed)) ?? initialBuildId;
+        if (buildId === undefined) {
+          return yield* Effect.fail(
+            new GcpPlatformResourceError({
+              resource: operation.name,
+              message: "Cloud Build operation returned neither a build response nor metadata.build.id",
+            }),
+          );
+        }
+        build = yield* waitForBuild(api, news.project, news.location, buildId);
+      }
       if (build.status !== "SUCCESS") {
         return yield* Effect.fail(new GcpPlatformResourceError({ resource: build.id, message: `Cloud Build ended in ${build.status}` }));
       }
