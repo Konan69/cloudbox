@@ -9,3 +9,4 @@ cloudbox.json
 generated/
 *.user-data.sh
 .pi/
+.impeccable/

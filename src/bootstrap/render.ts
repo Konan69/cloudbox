@@ -52,6 +52,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl git gh rsync build-essential python3 sudo util-linux jq sqlite3 iproute2
+command -v flock >/dev/null
 
 if ! id -u ${config.boxUser} >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash ${config.boxUser}

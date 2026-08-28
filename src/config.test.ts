@@ -14,7 +14,7 @@ const valid = {
   t3: {
     repoUrl: "https://github.com/dev-mualim/t3code.git",
     branch: "main",
-    githubTokenEnv: "CLOUDBOX_GITHUB_TOKEN",
+    githubToken: "CLOUDBOX_GITHUB_TOKEN",
   },
   identity: { paths: ["~/.pi/agent"], excludes: ["sessions/"] },
   boxUser: "dev",

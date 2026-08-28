@@ -24,7 +24,7 @@ export const SshCidr = Schema.String.pipe(
 export const T3Config = Schema.Struct({
   repoUrl: Schema.NonEmptyString,
   branch: Schema.NonEmptyString,
-  githubTokenEnv: Schema.NonEmptyString,
+  githubToken: Schema.NonEmptyString,
 });
 
 export const IdentityConfig = Schema.Struct({

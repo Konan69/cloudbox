@@ -46,12 +46,12 @@ const deploymentInputs = Effect.gen(function* () {
         }),
     ),
   );
-  const githubToken = yield* Effect.sync(() => process.env[config.t3.githubTokenEnv]).pipe(
+  const githubToken = yield* Effect.sync(() => process.env[config.t3.githubToken]).pipe(
     Effect.flatMap(Schema.decodeUnknownEffect(Schema.NonEmptyString)),
     Effect.mapError(
       (cause) =>
         new DeploymentInputError({
-          message: `Required environment variable ${config.t3.githubTokenEnv} is missing or empty`,
+          message: `Required environment variable ${config.t3.githubToken} is missing or empty`,
           cause,
         }),
     ),
@@ -220,7 +220,7 @@ export default Alchemy.Stack(
               Action: ["ec2:StopInstances", "ec2:DescribeInstances"],
               Resource: "*",
               Condition: {
-                StringEquals: { "ec2:ResourceTag/cloudbox": config.name },
+                StringEquals: { "aws:ResourceTag/cloudbox": config.name },
               },
             },
           ],
