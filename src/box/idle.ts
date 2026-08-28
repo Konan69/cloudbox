@@ -21,13 +21,33 @@ const KEEP_AWAKE_PATH = "/run/cloudbox/keepawake";
 const AWS_IMDS_BASE = "http://169.254.169.254/latest";
 const GCP_METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1";
 const GCP_COMPUTE_API = "https://compute.googleapis.com/compute/v1";
+export const IDLE_CHECK_INTERVAL_MS = 5 * 60_000;
 
 export const IdleState = Schema.Struct({
   idleSinceEpochMs: Schema.NullOr(Schema.Number),
   consecutiveChecks: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  lastTickEpochMs: Schema.optional(Schema.Number),
+  graceUntilEpochMs: Schema.optional(Schema.Number),
 });
 
 type IdleState = typeof IdleState.Type;
+
+export const detectResumeGrace = (
+  previous: Pick<IdleState, "lastTickEpochMs" | "graceUntilEpochMs">,
+  nowEpochMs: number,
+  idleMinutes: number,
+  intervalMs = IDLE_CHECK_INTERVAL_MS,
+) => {
+  const elapsed =
+    previous.lastTickEpochMs === undefined ? 0 : nowEpochMs - previous.lastTickEpochMs;
+  const resumed = elapsed > 3 * intervalMs;
+  return {
+    resumed,
+    graceUntilEpochMs: resumed
+      ? nowEpochMs + idleMinutes * 60_000
+      : previous.graceUntilEpochMs,
+  };
+};
 
 type ProcessRow = {
   readonly pid: number;
@@ -430,21 +450,39 @@ const sleepHost = (provider: IdleConfig["provider"]) =>
 
 export const program = Effect.gen(function* () {
   const config = yield* readJson(CONFIG_PATH, IdleConfig);
-  const busy = yield* isBusy(config);
+  const previous = yield* readState;
   const now = yield* Effect.sync(() => Date.now());
+  const timing = detectResumeGrace(previous, now, config.idleMinutes);
+  const tickState = {
+    lastTickEpochMs: now,
+    ...(timing.graceUntilEpochMs === undefined
+      ? {}
+      : { graceUntilEpochMs: timing.graceUntilEpochMs }),
+  };
+  const busy = yield* isBusy(config);
 
+  if (timing.resumed) {
+    yield* Effect.logInfo(
+      `resume clock jump detected; suspension blocked for ${String(config.idleMinutes)} minute(s)`,
+    );
+  }
   if (busy) {
-    yield* writeState({ idleSinceEpochMs: null, consecutiveChecks: 0 });
+    yield* writeState({ idleSinceEpochMs: null, consecutiveChecks: 0, ...tickState });
     yield* Effect.logInfo("cloudbox is busy; idle streak reset");
     return;
   }
+  if (timing.graceUntilEpochMs !== undefined && now < timing.graceUntilEpochMs) {
+    yield* writeState({ idleSinceEpochMs: null, consecutiveChecks: 0, ...tickState });
+    yield* Effect.logInfo("cloudbox is inside the post-resume grace period; idle streak reset");
+    return;
+  }
 
-  const previous = yield* readState;
   const idleSinceEpochMs =
     previous.idleSinceEpochMs === null ? now : previous.idleSinceEpochMs;
   const next: IdleState = {
     idleSinceEpochMs,
     consecutiveChecks: previous.consecutiveChecks + 1,
+    ...tickState,
   };
   yield* writeState(next);
 
