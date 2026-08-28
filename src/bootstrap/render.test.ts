@@ -5,6 +5,7 @@ import { CloudboxConfig } from "../config.ts";
 import { renderBootstrap, renderUserData } from "./render.ts";
 
 const config = Schema.decodeUnknownSync(CloudboxConfig)({
+  provider: "aws",
   name: "dev",
   region: "us-east-1",
   instanceType: "m7i.4xlarge",
@@ -13,9 +14,8 @@ const config = Schema.decodeUnknownSync(CloudboxConfig)({
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {
-    repoUrl: "https://github.com/dev-mualim/t3code.git",
+    repoUrl: "https://github.com/example/t3code.git",
     branch: "main",
-    githubToken: "CLOUDBOX_GITHUB_TOKEN",
   },
   identity: { paths: ["~/.pi/agent"], excludes: ["sessions/"] },
   boxUser: "dev",
@@ -26,7 +26,6 @@ describe("renderBootstrap", () => {
     const script = renderBootstrap({
       config,
       sshPublicKey: "ssh-ed25519 AAAATEST laptop",
-      githubToken: "github-secret-value",
       idleBundle: "console.log('idle')",
     });
 
@@ -46,7 +45,6 @@ describe("renderBootstrap", () => {
     const userData = renderUserData({
       config,
       sshPublicKey: "ssh-ed25519 AAAATEST laptop",
-      githubToken: "github-secret-value",
       idleBundle: "console.log('idle')",
     });
 
@@ -54,15 +52,16 @@ describe("renderBootstrap", () => {
     expect(userData).toContain("gzip --decompress");
   });
 
-  it("does not place clone credentials or SSH keys in clear text", () => {
+  it("clones the public fork without credentials", () => {
     const script = renderBootstrap({
       config,
       sshPublicKey: "ssh-ed25519 AAAATEST laptop",
-      githubToken: "github-secret-value",
       idleBundle: "idle-bundle",
     });
 
-    expect(script).not.toContain("github-secret-value");
+    expect(script).toContain("https://github.com/example/t3code.git");
+    expect(script).not.toContain("GIT_ASKPASS");
+    expect(script).not.toContain("CLOUDBOX_CLONE_TOKEN");
     expect(script).not.toContain("ssh-ed25519 AAAATEST laptop");
   });
 });

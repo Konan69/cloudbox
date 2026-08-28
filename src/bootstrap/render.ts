@@ -5,7 +5,6 @@ import type { CloudboxConfig } from "../config.ts";
 export interface BootstrapInput {
   readonly config: CloudboxConfig;
   readonly sshPublicKey: string;
-  readonly githubToken: string;
   readonly idleBundle: string;
 }
 
@@ -19,12 +18,7 @@ const AGENT_PACKAGES = [
   "opencode-ai@1.18.21",
 ] as const;
 
-export const renderBootstrap = ({
-  config,
-  sshPublicKey,
-  githubToken,
-  idleBundle,
-}: BootstrapInput): string => {
+export const renderBootstrap = ({ config, sshPublicKey, idleBundle }: BootstrapInput): string => {
   const boxConfig = JSON.stringify(
     {
       name: config.name,
@@ -84,33 +78,13 @@ if [[ ! -x /home/${config.boxUser}/.vite-plus/bin/vp ]]; then
 fi
 sudo -iu ${config.boxUser} bash -lc 'command -v vp && vp --version'
 
-install -d -m 700 -o ${config.boxUser} -g ${config.boxUser} /home/${config.boxUser}/.config/cloudbox
-readonly ASKPASS=/home/${config.boxUser}/.config/cloudbox/github-askpass.sh
-cat > "$ASKPASS" <<'ASKPASS'
-#!/usr/bin/env bash
-case "$1" in
-  *Username*) printf '%s\n' 'x-access-token' ;;
-  *Password*) printf '%s\n' "$CLOUDBOX_CLONE_TOKEN" ;;
-  *) exit 1 ;;
-esac
-ASKPASS
-chown ${config.boxUser}:${config.boxUser} "$ASKPASS"
-chmod 700 "$ASKPASS"
-export CLOUDBOX_CLONE_TOKEN="$(printf '%s' '${b64(githubToken)}' | base64 --decode)"
-export GIT_ASKPASS="$ASKPASS"
-export GIT_TERMINAL_PROMPT=0
-
 if [[ ! -d /home/${config.boxUser}/t3code/.git ]]; then
-  sudo --preserve-env=CLOUDBOX_CLONE_TOKEN,GIT_ASKPASS,GIT_TERMINAL_PROMPT -u ${config.boxUser} \\
-    git clone --branch ${shellQuote(config.t3.branch)} --single-branch ${shellQuote(config.t3.repoUrl)} /home/${config.boxUser}/t3code
+  sudo -u ${config.boxUser} git clone --branch ${shellQuote(config.t3.branch)} --single-branch ${shellQuote(config.t3.repoUrl)} /home/${config.boxUser}/t3code
 else
-  sudo --preserve-env=CLOUDBOX_CLONE_TOKEN,GIT_ASKPASS,GIT_TERMINAL_PROMPT -u ${config.boxUser} \\
-    git -C /home/${config.boxUser}/t3code fetch origin ${shellQuote(config.t3.branch)}
+  sudo -u ${config.boxUser} git -C /home/${config.boxUser}/t3code fetch origin ${shellQuote(config.t3.branch)}
   sudo -u ${config.boxUser} git -C /home/${config.boxUser}/t3code checkout ${shellQuote(config.t3.branch)}
   sudo -u ${config.boxUser} git -C /home/${config.boxUser}/t3code reset --hard FETCH_HEAD
 fi
-unset CLOUDBOX_CLONE_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT
-rm -f "$ASKPASS"
 
 ### T3 HEADLESS — refine from docs/t3-headless.md
 sudo -iu ${config.boxUser} bash -lc '

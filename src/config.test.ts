@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import { ConfigError, parseConfig } from "./config.ts";
 
 const valid = {
+  provider: "aws",
   name: "dev",
   region: "us-east-1",
   instanceType: "m7i.4xlarge",
@@ -12,9 +13,8 @@ const valid = {
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {
-    repoUrl: "https://github.com/dev-mualim/t3code.git",
+    repoUrl: "https://github.com/example/t3code.git",
     branch: "main",
-    githubToken: "CLOUDBOX_GITHUB_TOKEN",
   },
   identity: { paths: ["~/.pi/agent"], excludes: ["sessions/"] },
   boxUser: "dev",
@@ -24,6 +24,7 @@ describe("CloudboxConfig", () => {
   it.effect("decodes a complete config", () =>
     Effect.gen(function* () {
       const config = yield* parseConfig("cloudbox.json", JSON.stringify(valid));
+      expect(config.provider).toBe("aws");
       expect(config.instanceType).toBe("m7i.4xlarge");
       expect(config.boxUser).toBe("dev");
     }),

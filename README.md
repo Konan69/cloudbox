@@ -22,7 +22,6 @@ The AMI is never hardcoded. CloudFormation resolves Canonical's public SSM param
 
 - Node.js `>=24.10`, pnpm `11.10.0`, and AWS permissions to create EC2, VPC, IAM, and CloudFormation resources.
 - An existing public SSH key.
-- A GitHub fine-grained token with read-only access to `dev-mualim/t3code`.
 - `rsync` and `ssh` on the laptop.
 - An AWS region and instance type that support hibernation.
 
@@ -48,21 +47,11 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every configuration field is required. There are no config defaults. `instanceType` must be explicit, and `sshCidr` rejects `0.0.0.0/0`.
+Every configuration field is required. There are no config defaults. `provider` must be `"aws"`, `instanceType` must be explicit, and `sshCidr` rejects `0.0.0.0/0`.
 
-Set the token named by `t3.githubToken`:
-
-```bash
-export CLOUDBOX_GITHUB_TOKEN='github_pat_...'
-```
+The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
 `cloudbox.json`, `.env*`, generated user data, `.alchemy/`, and `.pi/` are ignored by git.
-
-### GitHub token exposure
-
-The private-clone token is passed through EC2 user data. The rendered payload avoids putting it in the clone URL or command arguments, but root on the instance and principals allowed to read EC2 user data can recover it. Cloud-init may retain a root-only copy under `/var/lib/cloud/instances/`.
-
-Use a fine-grained, repository-scoped, read-only token. Rotate or revoke it after bootstrap if future rebuilds do not need it.
 
 ## Build and verify locally
 

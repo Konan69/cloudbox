@@ -1,4 +1,5 @@
 {
+  "provider": "aws",
   "name": "dev",
   "region": "us-east-1",
   "instanceType": "m7i.4xlarge",
@@ -7,9 +8,8 @@
   "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
   "idleMinutes": 30,
   "t3": {
-    "repoUrl": "https://github.com/dev-mualim/t3code.git",
-    "branch": "main",
-    "githubToken": "CLOUDBOX_GITHUB_TOKEN"
+    "repoUrl": "https://github.com/example/t3code.git",
+    "branch": "main"
   },
   "identity": {
     "paths": [
