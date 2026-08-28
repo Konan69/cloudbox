@@ -101,6 +101,61 @@ const runProcess = (command: string, args: ReadonlyArray<string>) =>
     });
   });
 
+export interface ProcessOutput {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+export type RsyncRunner = (
+  path: string,
+  args: ReadonlyArray<string>,
+) => Effect.Effect<ProcessOutput, CloudboxCliError>;
+
+const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
+  Effect.callback<ProcessOutput, CloudboxCliError>((resume) => {
+    const child = spawn(command, [...args], {
+      env: { ...process.env, LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let settled = false;
+    let stdout = "";
+    let stderr = "";
+    const complete = (effect: Effect.Effect<ProcessOutput, CloudboxCliError>) => {
+      if (settled) return;
+      settled = true;
+      resume(effect);
+    };
+    if (child.stdout === null || child.stderr === null) {
+      child.kill();
+      complete(Effect.fail(cliError(command, `Could not capture ${command} output`)));
+      return;
+    }
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const text = chunk.toString();
+      stdout += text;
+      process.stdout.write(text);
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      const text = chunk.toString();
+      stderr += text;
+      process.stderr.write(text);
+    });
+    child.once("error", (cause) =>
+      complete(Effect.fail(cliError(command, `Could not start ${command}`, cause))),
+    );
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        complete(Effect.succeed({ stdout, stderr }));
+      } else if (code !== null) {
+        complete(Effect.fail(cliError(command, `${command} exited with status ${String(code)}`)));
+      } else if (signal !== null) {
+        complete(Effect.fail(cliError(command, `${command} terminated by signal ${signal}`)));
+      } else {
+        complete(Effect.fail(cliError(command, `${command} terminated without an exit status`)));
+      }
+    });
+  });
+
 const requirePublicIp = (instance: BoxInstance) => requireString("public IP", instance.publicIp);
 
 const statusCommand = Command.make("status").pipe(
@@ -148,24 +203,168 @@ const dryRunFlag = Flag.boolean("dry-run").pipe(
   Flag.withDescription("Print rsync changes without modifying the box."),
 );
 
-const expandHome = (path: string): string =>
-  path === "~" || path.startsWith("~/")
-    ? NodePath.join(NodeOs.homedir(), path.slice(2))
-    : NodePath.resolve(path);
+const forceFlag = Flag.boolean("force").pipe(
+  Flag.withDescription("Transfer even when the dry-run total exceeds identity.maxTransferMb."),
+);
 
-const syncCommand = Command.make("sync", { dryRun: dryRunFlag }).pipe(
+const withTrailingSlash = (path: string): string =>
+  path.endsWith("/") ? path : `${path}/`;
+
+export interface RsyncArgsInput {
+  readonly path: string;
+  readonly localHome: string;
+  readonly boxUser: string;
+  readonly publicIp: string;
+  readonly excludes: ReadonlyArray<string>;
+  readonly dryRun: boolean;
+}
+
+export const buildRsyncArgs = ({
+  path,
+  localHome,
+  boxUser,
+  publicIp,
+  excludes,
+  dryRun,
+}: RsyncArgsInput): ReadonlyArray<string> => {
+  const directory = path.endsWith("/");
+  const relativePath = path.slice(2);
+  const expanded = NodePath.join(localHome, relativePath);
+  const source = directory ? withTrailingSlash(expanded) : expanded;
+  const remotePath = directory ? withTrailingSlash(path) : path;
+  return [
+    "-az",
+    "--mkpath",
+    "--info=stats2,name1",
+    ...(dryRun ? ["--dry-run"] : []),
+    ...excludes.map((exclude) => `--exclude=${exclude}`),
+    "--",
+    source,
+    `${boxUser}@${publicIp}:${remotePath}`,
+  ];
+};
+
+export interface RsyncStats {
+  readonly path: string;
+  readonly files: number;
+  readonly bytesToTransfer: number;
+}
+
+const parseRsyncMetric = (path: string, output: string, label: string) =>
+  Effect.try({
+    try: () => {
+      const match = new RegExp(`^${label}: ([0-9,]+)`, "m").exec(output);
+      if (match === null || match[1] === undefined) {
+        throw new Error(`missing ${label}`);
+      }
+      const value = Number(match[1].replaceAll(",", ""));
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`invalid ${label}`);
+      }
+      return value;
+    },
+    catch: (cause) =>
+      cliError("parse rsync stats", `Invalid rsync statistics for ${path}: ${label}`, cause),
+  });
+
+export const parseRsyncStats = (path: string, output: string) =>
+  Effect.gen(function* () {
+    const files = yield* parseRsyncMetric(path, output, "Number of regular files transferred");
+    const bytesToTransfer = yield* parseRsyncMetric(
+      path,
+      output,
+      "Total transferred file size",
+    );
+    return { path, files, bytesToTransfer } satisfies RsyncStats;
+  });
+
+const formatSyncSummary = (prefix: string, stats: RsyncStats): string =>
+  `${prefix} ${stats.path}: ${String(stats.files)} files, ${String(stats.bytesToTransfer)} bytes to transfer`;
+
+export const enforceTransferLimit = (
+  stats: ReadonlyArray<RsyncStats>,
+  maxTransferMb: number,
+  force: boolean,
+) => {
+  const totalBytes = stats.reduce((total, item) => total + item.bytesToTransfer, 0);
+  const maxBytes = maxTransferMb * 1_000_000;
+  if (force || totalBytes <= maxBytes) return Effect.void;
+  const perPath = stats
+    .map((item) => `  ${item.path}: ${String(item.bytesToTransfer)} bytes`)
+    .join("\n");
+  return Effect.fail(
+    cliError(
+      "identity sync size guard",
+      `Identity sync would transfer ${String(totalBytes)} bytes, exceeding identity.maxTransferMb=${String(maxTransferMb)}.\n${perPath}\nAdd identity.excludes entries or rerun with --force.`,
+    ),
+  );
+};
+
+export interface IdentitySyncInput {
+  readonly paths: ReadonlyArray<string>;
+  readonly excludes: ReadonlyArray<string>;
+  readonly maxTransferMb: number;
+  readonly localHome: string;
+  readonly boxUser: string;
+  readonly publicIp: string;
+  readonly dryRun: boolean;
+  readonly force: boolean;
+}
+
+export const runIdentitySync = (input: IdentitySyncInput, runner: RsyncRunner) => {
+  const runPass = (dryRun: boolean, prefix: string) =>
+    Effect.forEach(input.paths, (path) =>
+      runner(
+        path,
+        buildRsyncArgs({
+          path,
+          localHome: input.localHome,
+          boxUser: input.boxUser,
+          publicIp: input.publicIp,
+          excludes: input.excludes,
+          dryRun,
+        }),
+      ).pipe(
+        Effect.mapError((cause) =>
+          cliError("identity sync", `rsync failed for ${path}: ${cause.message}`, cause),
+        ),
+        Effect.flatMap((output) => parseRsyncStats(path, output.stdout)),
+        Effect.tap((stats) => Console.log(formatSyncSummary(prefix, stats))),
+      ),
+    );
+
+  return Effect.gen(function* () {
+    if (input.dryRun) {
+      yield* runPass(true, "Dry run");
+      return;
+    }
+    const preflight = yield* runPass(true, "Preflight");
+    yield* enforceTransferLimit(preflight, input.maxTransferMb, input.force);
+    yield* runPass(false, "Transferred");
+  });
+};
+
+const liveRsyncRunner: RsyncRunner = (_path, args) => runCapturedProcess("rsync", args);
+
+const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag }).pipe(
   Command.withDescription("Rsync configured identity paths to the running box."),
-  Command.withHandler(({ dryRun }) =>
+  Command.withHandler(({ dryRun, force }) =>
     withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
         const publicIp = yield* requirePublicIp(instance);
-        for (const path of config.identity.paths) {
-          const args = ["-az", "--mkpath"];
-          if (dryRun) args.push("--dry-run");
-          for (const exclude of config.identity.excludes) args.push(`--exclude=${exclude}`);
-          args.push(expandHome(path), `${config.boxUser}@${publicIp}:${path}`);
-          yield* runProcess("rsync", args);
-        }
+        yield* runIdentitySync(
+          {
+            paths: config.identity.paths,
+            excludes: config.identity.excludes,
+            maxTransferMb: config.identity.maxTransferMb,
+            localHome: NodeOs.homedir(),
+            boxUser: config.boxUser,
+            publicIp,
+            dryRun,
+            force,
+          },
+          liveRsyncRunner,
+        );
       }),
     ),
   ),
