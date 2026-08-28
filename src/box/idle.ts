@@ -220,7 +220,8 @@ export const program = Effect.gen(function* () {
   }
 
   const previous = yield* readState;
-  const idleSinceEpochMs = previous.idleSinceEpochMs ?? now;
+  const idleSinceEpochMs =
+    previous.idleSinceEpochMs === null ? now : previous.idleSinceEpochMs;
   const next: IdleState = {
     idleSinceEpochMs,
     consecutiveChecks: previous.consecutiveChecks + 1,

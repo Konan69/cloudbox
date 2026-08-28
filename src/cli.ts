@@ -28,9 +28,34 @@ export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
   readonly cause?: unknown;
 }> {}
 
+const Ec2StateName = Schema.Literals([
+  "pending",
+  "running",
+  "shutting-down",
+  "terminated",
+  "stopping",
+  "stopped",
+]);
+
+type Ec2StateName = typeof Ec2StateName.Type;
+
+const DescribeInstancesResult = Schema.Struct({
+  Reservations: Schema.Array(
+    Schema.Struct({
+      Instances: Schema.Array(
+        Schema.Struct({
+          InstanceId: Schema.NonEmptyString,
+          State: Schema.Struct({ Name: Ec2StateName }),
+          PublicIpAddress: Schema.optional(Schema.NonEmptyString),
+        }),
+      ),
+    }),
+  ),
+});
+
 type BoxInstance = {
   readonly instanceId: string;
-  readonly state: string;
+  readonly state: Ec2StateName;
   readonly publicIp: string | undefined;
 };
 
@@ -65,9 +90,12 @@ const findInstance = (config: CloudboxConfig, client: EC2Client) =>
         }),
       ),
     );
-    const instances = (response.Reservations ?? []).flatMap(
-      (reservation) => reservation.Instances ?? [],
+    const decoded = yield* Schema.decodeUnknownEffect(DescribeInstancesResult)(response).pipe(
+      Effect.mapError((cause) =>
+        cliError("DescribeInstances", "DescribeInstances returned an invalid response", cause),
+      ),
     );
+    const instances = decoded.Reservations.flatMap((reservation) => reservation.Instances);
     if (instances.length !== 1) {
       return yield* Effect.fail(
         cliError(
@@ -80,10 +108,9 @@ const findInstance = (config: CloudboxConfig, client: EC2Client) =>
     if (instance === undefined) {
       return yield* Effect.fail(cliError("find instance", "AWS returned an empty instance list"));
     }
-    const instanceId = yield* requireString("instance id", instance.InstanceId);
     return {
-      instanceId,
-      state: instance.State?.Name ?? "unknown",
+      instanceId: instance.InstanceId,
+      state: instance.State.Name,
       publicIp: instance.PublicIpAddress,
     } satisfies BoxInstance;
   });
@@ -134,15 +161,17 @@ const runProcess = (command: string, args: ReadonlyArray<string>) =>
     child.once("error", (cause) =>
       resume(Effect.fail(cliError(command, `Could not start ${command}`, cause))),
     );
-    child.once("close", (code) =>
-      code === 0
-        ? resume(Effect.void)
-        : resume(
-            Effect.fail(
-              cliError(command, `${command} exited with status ${String(code ?? "signal")}`),
-            ),
-          ),
-    );
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resume(Effect.void);
+      } else if (code !== null) {
+        resume(Effect.fail(cliError(command, `${command} exited with status ${String(code)}`)));
+      } else if (signal !== null) {
+        resume(Effect.fail(cliError(command, `${command} terminated by signal ${signal}`)));
+      } else {
+        resume(Effect.fail(cliError(command, `${command} terminated without an exit status`)));
+      }
+    });
   });
 
 const requirePublicIp = (instance: BoxInstance) =>
@@ -160,7 +189,7 @@ const statusCommand = Command.make("status").pipe(
           {
             instanceId: instance.instanceId,
             state: instance.state,
-            publicIp: instance.publicIp ?? null,
+            publicIp: instance.publicIp,
           },
           null,
           2,
