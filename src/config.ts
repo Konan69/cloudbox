@@ -31,20 +31,69 @@ export const IdentityConfig = Schema.Struct({
   excludes: Schema.Array(Schema.NonEmptyString),
 });
 
-export const CloudboxConfig = Schema.Struct({
-  provider: Schema.Literal("aws"),
+export const GcpCredentials = Schema.Union([
+  Schema.Literal("adc"),
+  Schema.Struct({ serviceAccountJsonPath: Schema.NonEmptyString }),
+]);
+
+export const GcpMachineType = Schema.NonEmptyString.pipe(
+  Schema.refine((value): value is string => /^(?:n1|n2|c2)-/.test(value), {
+    identifier: "GcpMachineType",
+    description: "an Intel Compute Engine N1, N2, or C2 machine type",
+  }),
+);
+
+const GcpCloudboxName = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string => /^[a-z0-9](?:[-a-z0-9]{0,48}[a-z0-9])?$/.test(value),
+    {
+      identifier: "GcpCloudboxName",
+      description: "1-50 lowercase letters, digits, or hyphens, starting and ending alphanumeric",
+    },
+  ),
+);
+
+export const GcpConfig = Schema.Struct({
+  project: Schema.NonEmptyString,
+  zone: Schema.NonEmptyString,
+  machineType: GcpMachineType,
+  bootDiskGb: PositiveInteger,
+  dataDiskGb: PositiveInteger,
+  dataDiskType: Schema.Literals(["pd-ssd", "pd-balanced"]),
+  credentials: GcpCredentials,
+});
+
+const SharedConfig = {
   name: Schema.NonEmptyString,
-  region: Schema.NonEmptyString,
-  instanceType: Schema.NonEmptyString,
-  diskGb: PositiveInteger,
   sshCidr: SshCidr,
   sshPublicKeyPath: Schema.NonEmptyString,
   idleMinutes: PositiveInteger,
   t3: T3Config,
   identity: IdentityConfig,
   boxUser: Schema.Literal("dev"),
+} as const;
+
+export const AwsCloudboxConfig = Schema.Struct({
+  ...SharedConfig,
+  provider: Schema.Literal("aws"),
+  region: Schema.NonEmptyString,
+  instanceType: Schema.NonEmptyString,
+  diskGb: PositiveInteger,
 });
 
+export const GcpCloudboxConfig = Schema.Struct({
+  ...SharedConfig,
+  name: GcpCloudboxName,
+  provider: Schema.Literal("gcp"),
+  gcp: GcpConfig,
+});
+
+export const CloudboxConfig = Schema.Union([AwsCloudboxConfig, GcpCloudboxConfig]);
+
+export type GcpCredentials = typeof GcpCredentials.Type;
+export type GcpHostConfig = typeof GcpConfig.Type;
+export type AwsCloudboxConfig = typeof AwsCloudboxConfig.Type;
+export type GcpCloudboxConfig = typeof GcpCloudboxConfig.Type;
 export type CloudboxConfig = typeof CloudboxConfig.Type;
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{

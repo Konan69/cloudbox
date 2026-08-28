@@ -21,11 +21,19 @@ const AGENT_PACKAGES = [
 export const renderBootstrap = ({ config, sshPublicKey, idleBundle }: BootstrapInput): string => {
   const boxConfig = JSON.stringify(
     {
-      provider: {
-        kind: "aws",
-        name: config.name,
-        region: config.region,
-      },
+      provider:
+        config.provider === "aws"
+          ? {
+              kind: "aws",
+              name: config.name,
+              region: config.region,
+            }
+          : {
+              kind: "gcp",
+              name: config.name,
+              project: config.gcp.project,
+              zone: config.gcp.zone,
+            },
       idleMinutes: config.idleMinutes,
       t3Port: 3773,
       t3Activity: { kind: "tcp" },
@@ -34,6 +42,7 @@ export const renderBootstrap = ({ config, sshPublicKey, idleBundle }: BootstrapI
     null,
     2,
   );
+  const cloudSdkPackage = config.provider === "aws" ? "@aws-sdk/client-ec2@3.1120.0" : "";
 
   return `#!/usr/bin/env bash
 set -euo pipefail
@@ -138,10 +147,7 @@ runuser -u ${config.boxUser} -- env XDG_RUNTIME_DIR="/run/user/\${BOX_UID}" syst
 runuser -u ${config.boxUser} -- env XDG_RUNTIME_DIR="/run/user/\${BOX_UID}" systemctl --user enable --now t3code-fork.service
 
 install -d -m 755 /opt/cloudbox /etc/cloudbox /var/lib/cloudbox
-npm install --prefix /opt/cloudbox --omit=dev \\
-  effect@4.0.0-rc.112 \\
-  @effect/platform-node@4.0.0-rc.112 \\
-  @aws-sdk/client-ec2@3.1120.0
+npm install --prefix /opt/cloudbox --omit=dev effect@4.0.0-rc.112 @effect/platform-node@4.0.0-rc.112 ${cloudSdkPackage}
 printf '%s' '${b64(idleBundle)}' | base64 --decode > /opt/cloudbox/idle.mjs
 chmod 755 /opt/cloudbox/idle.mjs
 printf '%s' '${b64(boxConfig)}' | base64 --decode > /etc/cloudbox/config.json
@@ -149,7 +155,7 @@ chmod 600 /etc/cloudbox/config.json
 
 cat > /etc/systemd/system/cloudbox-idle.service <<'UNIT'
 [Unit]
-Description=Hibernate Cloudbox after sustained inactivity
+Description=Suspend Cloudbox after sustained inactivity
 After=network-online.target
 
 [Service]
