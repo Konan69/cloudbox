@@ -19,16 +19,25 @@
   },
   "identity": {
     "paths": [
-      "~/.claude",
-      "~/.codex",
-      "~/.pi/agent",
-      "~/.config/opencode",
-      "~/.config/gh"
+      "~/.claude/settings.json",
+      "~/.claude/CLAUDE.md",
+      "~/.claude/skills/",
+      "~/.claude/projects/-home-dev/memory/",
+      "~/.pi/agent/auth.json",
+      "~/.pi/agent/settings.json",
+      "~/.pi/agent/agents/",
+      "~/.pi/agent/AGENTS.md",
+      "~/.config/gh/"
     ],
     "excludes": [
       "sessions/",
-      "pi-debug.log"
-    ]
+      "npm/",
+      "git/",
+      "*.jsonl",
+      "pi-debug.log",
+      "cache*"
+    ],
+    "maxTransferMb": 300
   },
   "boxUser": "dev"
 }

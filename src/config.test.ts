@@ -16,7 +16,11 @@ const valid = {
     repoUrl: "https://github.com/example/t3code.git",
     branch: "main",
   },
-  identity: { paths: ["~/.pi/agent"], excludes: ["sessions/"] },
+  identity: {
+    paths: ["~/.pi/agent/settings.json"],
+    excludes: ["sessions/"],
+    maxTransferMb: 300,
+  },
   boxUser: "dev",
 };
 
@@ -63,6 +67,20 @@ describe("CloudboxConfig", () => {
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("credentials");
+    }),
+  );
+
+  it.effect("refuses identity paths outside the user home", () =>
+    Effect.gen(function* () {
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({
+          ...valid,
+          identity: { ...valid.identity, paths: ["/home/dev/.pi/agent/settings.json"] },
+        }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("identity");
     }),
   );
 

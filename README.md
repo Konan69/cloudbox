@@ -90,11 +90,19 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. `sshCidr` rejects `0.0.0.0/0`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
 `cloudbox.json`, `.env*`, generated user data, `.alchemy/`, and `.pi/` are ignored by git.
+
+### Identity sync safety
+
+Identity paths must start with `~/`, so each path is translated from the laptop user's home to the box user's home. End directory paths with `/` to sync their contents rather than nesting the directory itself. The example configs include only small settings, skills, memory, and agent-definition paths; they exclude session transcripts and extension caches.
+
+Every real sync first runs rsync in dry-run mode and totals `Total transferred file size` across all paths. If that exceeds `identity.maxTransferMb`, the command lists each path's bytes and stops. Tighten `identity.excludes`, or use `cloudbox sync --force` after reviewing the totals.
+
+Credentials are copied only when explicitly listed in `identity.paths`. This includes `~/.codex/auth.json`, `~/.claude/.credentials.json`, and `~/.config/gh/hosts.yml`. The safer alternative is to omit those files and run `codex login`, `claude auth login`, and `gh auth login` once on the box.
 
 ## Build and verify locally
 
@@ -162,6 +170,7 @@ pnpm cloudbox wake
 pnpm cloudbox sleep
 pnpm cloudbox sync --dry-run
 pnpm cloudbox sync
+pnpm cloudbox sync --force
 pnpm cloudbox ssh
 pnpm cloudbox verify --host <ip> [--expect-vm] [--json]
 pnpm cloudbox verify-sleep [--timeout 1800] [--json]
@@ -173,7 +182,7 @@ pnpm cloudbox verify-idle [--timeout 1800] [--json]
 | `status` | Prints provider, instance ID/name, cloud state, and current public IP. |
 | `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. Then waits for TCP 22 and prints the IP. |
 | `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
-| `sync` | Runs `rsync -az --mkpath` for each configured identity path and applies every exclude. |
+| `sync` | Shows rsync names/stats per path. Real transfers run a dry-run size guard first; `--force` overrides `maxTransferMb`. |
 | `ssh` | Opens `ssh dev@<current-public-ip>`. |
 | `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
 | `verify-sleep` | Sleeps and wakes through the configured provider, then proves uptime and a marker PID survived. |

@@ -26,9 +26,17 @@ export const T3Config = Schema.Struct({
   branch: Schema.NonEmptyString,
 });
 
+export const IdentityPath = Schema.String.pipe(
+  Schema.refine((value): value is string => value.startsWith("~/"), {
+    identifier: "IdentityPath",
+    description: "a path relative to the local and remote user home, starting with ~/",
+  }),
+);
+
 export const IdentityConfig = Schema.Struct({
-  paths: Schema.Array(Schema.NonEmptyString),
+  paths: Schema.Array(IdentityPath),
   excludes: Schema.Array(Schema.NonEmptyString),
+  maxTransferMb: PositiveInteger,
 });
 
 export const GcpCredentials = Schema.Union([
