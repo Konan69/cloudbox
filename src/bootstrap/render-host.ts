@@ -197,6 +197,14 @@ phase_zfs() {
   zfs set mountpoint=none tank/incus
   zfs set mountpoint=/tank/archive tank/archive
   install -d -m 755 /tank/archive
+  # Per-thread machine workspaces (T3 machine mode): the server runs as the box
+  # user and creates tank/threads/<id>/ws via sudo; the parent must exist and be
+  # traversable/owned by that user.
+  if ! zfs list tank/threads >/dev/null 2>&1; then
+    zfs create -o mountpoint=/tank/threads tank/threads
+  fi
+  chmod 755 /tank
+  chown "$BOX_USER:$BOX_USER" /tank/threads
 }
 
 phase_incus() {
