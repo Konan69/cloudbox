@@ -20,6 +20,11 @@ import {
   verifySleepRoundtrip,
   type VerificationReport,
 } from "./acceptance/index.ts";
+import {
+  formatThreadSmokeReport,
+  makeSshThreadSmokeTransport,
+  runThreadSmokeSuite,
+} from "./acceptance/threadSmoke.ts";
 import type { CloudboxConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -422,6 +427,29 @@ const verifyCommand = Command.make("verify", {
   ),
 );
 
+const smokeThreadCommand = Command.make("smoke-thread", {
+  host: Flag.string("host").pipe(Flag.withDescription("Public IP or hostname running T3.")),
+  timeout: Flag.integer("timeout").pipe(
+    Flag.withDefault(240),
+    Flag.withDescription("Maximum seconds for each provider turn."),
+  ),
+}).pipe(
+  Command.withDescription("Run autonomous pi and Codex agent turns through the remote T3 server."),
+  Command.withHandler(({ host, timeout }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig("cloudbox.json");
+      const transport = yield* makeSshThreadSmokeTransport(config, host);
+      const report = yield* runThreadSmokeSuite(transport, timeout);
+      yield* Console.log(formatThreadSmokeReport(report));
+      if (!report.ok) {
+        yield* Effect.sync(() => {
+          process.exitCode = 1;
+        });
+      }
+    }),
+  ),
+);
+
 const verifySleepCommand = Command.make("verify-sleep", {
   timeout: timeoutFlag,
   json: jsonFlag,
@@ -467,6 +495,7 @@ export const cloudbox = Command.make("cloudbox").pipe(
     syncCommand,
     sshCommand,
     verifyCommand,
+    smokeThreadCommand,
     verifySleepCommand,
     verifyIdleCommand,
   ]),
