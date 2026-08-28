@@ -1,8 +1,10 @@
 # cloudbox
 
-One personal AWS EC2 development machine for dev. It runs the patched T3 Code fork headlessly, hibernates after sustained inactivity, and is controlled from a laptop with an Effect CLI.
+One personal AWS EC2 or Google Compute Engine development machine for dev. It runs the patched T3 Code fork headlessly, suspends after sustained inactivity, and is controlled from a laptop with an Effect CLI.
 
 ## What it creates
+
+Select `provider: "aws"` or `provider: "gcp"` in `cloudbox.json`. AWS creates:
 
 - One VPC with a public subnet and internet routing.
 - One imported EC2 SSH key and one security group: TCP 22 only from `sshCidr`; unrestricted egress.
@@ -39,6 +41,44 @@ AWS_ACCOUNT_ID          # optional; otherwise resolved with STS
 
 The laptop CLI uses the AWS SDK default credential chain. It supports the standard `AWS_*` variables, `AWS_PROFILE`, shared AWS config/credentials files, SSO, and other normal SDK sources.
 
+## GCP host
+
+The GCP stack uses a custom Effect-native Alchemy provider and the Compute Engine REST API v1. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, and one Ubuntu 24.04 x86_64 instance. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
+
+Copy the GCP example:
+
+```bash
+cp cloudbox.gcp.example.json cloudbox.json
+```
+
+For Application Default Credentials, configure either interactive ADC:
+
+```bash
+gcloud auth application-default login
+```
+
+or set `gcp.credentials` to a service-account key file:
+
+```json
+"credentials": { "serviceAccountJsonPath": "~/.config/gcloud/cloudbox.json" }
+```
+
+The deploying principal needs:
+
+- `roles/compute.instanceAdmin.v1`
+- `roles/iam.serviceAccountUser` for the instance service account
+
+Check that the organization policy does not disable nested virtualization:
+
+```bash
+gcloud org-policies describe constraints/compute.disableNestedVirtualization \
+  --project=YOUR_PROJECT --effective
+```
+
+The instance uses the default service account with the Compute OAuth scope. That service account needs `compute.instances.suspend` on this instance (normally through a narrow custom role and IAM condition). Without it, automatic idle suspend fails.
+
+GCE suspend preserves memory, but supports only instances with at most 208 GB RAM and no GPU. A suspended instance is automatically terminated after 60 days. In-guest suspend commands are ignored by GCE; Cloudbox calls `instances.suspend` through the Compute API. The external IP may change after resume.
+
 ## Configure
 
 ```bash
@@ -47,7 +87,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every configuration field is required. There are no config defaults. `provider` must be `"aws"`, `instanceType` must be explicit, and `sshCidr` rejects `0.0.0.0/0`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. `sshCidr` rejects `0.0.0.0/0`.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
@@ -110,7 +150,7 @@ pnpm cloudbox --help
 
 ## Laptop CLI
 
-All commands read `cloudbox.json` from the current directory and locate exactly one non-terminated instance tagged `cloudbox=<name>`.
+All commands read `cloudbox.json` from the current directory and dispatch by `provider`. AWS locates one non-terminated tagged instance. GCP locates `cloudbox-<name>` in the configured zone and verifies its `cloudbox=<name>` label.
 
 ```bash
 pnpm cloudbox status
@@ -123,9 +163,9 @@ pnpm cloudbox ssh
 
 | Command | Behavior |
 |---|---|
-| `status` | Prints instance ID, EC2 state, and current public IP. |
-| `wake` | Starts the instance, waits for `running`, polls TCP 22, then prints the IP. |
-| `sleep` | Calls `StopInstances` with `Hibernate=true`. |
+| `status` | Prints provider, instance ID/name, cloud state, and current public IP. |
+| `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. Then waits for TCP 22 and prints the IP. |
+| `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
 | `sync` | Runs `rsync -az --mkpath` for each configured identity path and applies every exclude. |
 | `ssh` | Opens `ssh dev@<current-public-ip>`. |
 
@@ -155,7 +195,7 @@ The service runs:
 
 The persistent T3-managed `cloudflared` helper is excluded from the child-process test; otherwise merely pairing the relay would prevent hibernation forever. Active relay traffic still appears as an established connection to port 3773.
 
-The idle streak is stored in `/var/lib/cloudbox/idle.json`. At `idleMinutes`, the service gets its instance ID with an IMDSv2 token and calls `StopInstances(Hibernate=true)` using the instance role.
+The idle streak is stored in `/var/lib/cloudbox/idle.json`. At `idleMinutes`, AWS gets its instance ID with an IMDSv2 token and calls `StopInstances(Hibernate=true)`. GCP reads project, zone, instance name, and an access token from `metadata.google.internal`, then calls `instances.suspend` on itself. Busy detection is shared.
 
 Force the box awake during unattended work:
 
@@ -190,8 +230,6 @@ systemctl --user status t3code-fork.service --no-pager
 sudo systemctl status cloudbox-idle.timer --no-pager
 ```
 
-## Phase 2 / 3
+## Future work
 
-**Phase 2:** add GCP through a custom Alchemy `Resource`. Alchemy `2.0.0-beta.74` has no GCP provider. This version intentionally contains no GCP code.
-
-**Phase 3:** add relay wake-on-connect so a connection request can start the sleeping instance. This version makes no relay changes.
+Add relay wake-on-connect so a connection request can start or resume the sleeping instance. This version makes no relay changes.

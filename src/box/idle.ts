@@ -1,4 +1,3 @@
-import { EC2Client, StopInstancesCommand } from "@aws-sdk/client-ec2";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Data from "effect/Data";
@@ -11,7 +10,9 @@ import { pathToFileURL } from "node:url";
 const CONFIG_PATH = "/etc/cloudbox/config.json";
 const STATE_PATH = "/var/lib/cloudbox/idle.json";
 const KEEP_AWAKE_PATH = "/run/cloudbox/keepawake";
-const IMDS_BASE = "http://169.254.169.254/latest";
+const AWS_IMDS_BASE = "http://169.254.169.254/latest";
+const GCP_METADATA_BASE = "http://metadata.google.internal/computeMetadata/v1";
+const GCP_COMPUTE_API = "https://compute.googleapis.com/compute/v1";
 
 const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
 
@@ -21,7 +22,16 @@ const AwsIdleProvider = Schema.Struct({
   region: Schema.NonEmptyString,
 });
 
-const GcpIdleProvider = Schema.Struct({ kind: Schema.Literal("gcp") });
+type AwsIdleProvider = typeof AwsIdleProvider.Type;
+
+const GcpIdleProvider = Schema.Struct({
+  kind: Schema.Literal("gcp"),
+  name: Schema.NonEmptyString,
+  project: Schema.NonEmptyString,
+  zone: Schema.NonEmptyString,
+});
+
+type GcpIdleProvider = typeof GcpIdleProvider.Type;
 
 const TcpT3Activity = Schema.Struct({ kind: Schema.Literal("tcp") });
 const AuthenticatedT3Activity = Schema.Struct({
@@ -281,7 +291,7 @@ const fetchText = (operation: string, url: string, init?: RequestInit) =>
     try: () =>
       fetch(url, init).then((response) => {
         if (!response.ok) {
-          throw new Error(`${operation}: IMDS returned HTTP ${String(response.status)}`);
+          throw new Error(`${operation}: request returned HTTP ${String(response.status)}`);
         }
         return response.text();
       }),
@@ -289,13 +299,13 @@ const fetchText = (operation: string, url: string, init?: RequestInit) =>
   });
 
 const getAwsInstanceId = Effect.gen(function* () {
-  const token = yield* fetchText("request IMDSv2 token", `${IMDS_BASE}/api/token`, {
+  const token = yield* fetchText("request IMDSv2 token", `${AWS_IMDS_BASE}/api/token`, {
     method: "PUT",
     headers: { "X-aws-ec2-metadata-token-ttl-seconds": "21600" },
   });
   const instanceId = yield* fetchText(
     "read instance id",
-    `${IMDS_BASE}/meta-data/instance-id`,
+    `${AWS_IMDS_BASE}/meta-data/instance-id`,
     { headers: { "X-aws-ec2-metadata-token": token } },
   );
   if (!instanceId.startsWith("i-")) {
@@ -304,15 +314,12 @@ const getAwsInstanceId = Effect.gen(function* () {
   return instanceId.trim();
 });
 
-const sleepHost = (provider: IdleConfig["provider"]) =>
+const hibernateAws = (provider: AwsIdleProvider) =>
   Effect.gen(function* () {
-    if (provider.kind === "gcp") {
-      yield* run("systemctl", ["poweroff"]);
-      yield* Effect.logInfo("GCP host poweroff requested");
-      return;
-    }
-
     const instanceId = yield* getAwsInstanceId;
+    const { EC2Client, StopInstancesCommand } = yield* Effect.promise(
+      () => import("@aws-sdk/client-ec2"),
+    );
     const client = new EC2Client({ region: provider.region });
     yield* Effect.tryPromise({
       try: () =>
@@ -326,6 +333,52 @@ const sleepHost = (provider: IdleConfig["provider"]) =>
     });
     yield* Effect.logInfo(`hibernation requested for ${instanceId}`);
   });
+
+const gcpMetadata = (path: string) =>
+  fetchText(`read GCP metadata ${path}`, `${GCP_METADATA_BASE}${path}`, {
+    headers: { "Metadata-Flavor": "Google" },
+  }).pipe(Effect.map((value) => value.trim()));
+
+const suspendGcp = (config: GcpIdleProvider) =>
+  Effect.gen(function* () {
+    const [instanceName, metadataZone, metadataProject, tokenJson] = yield* Effect.all([
+      gcpMetadata("/instance/name"),
+      gcpMetadata("/instance/zone"),
+      gcpMetadata("/project/project-id"),
+      gcpMetadata("/instance/service-accounts/default/token"),
+    ]);
+    const zone = metadataZone.split("/").at(-1);
+    if (
+      zone === undefined ||
+      zone !== config.zone ||
+      metadataProject !== config.project ||
+      instanceName !== `cloudbox-${config.name}`
+    ) {
+      return yield* Effect.fail(
+        fail("validate GCP instance identity", {
+          instanceName,
+          metadataProject,
+          metadataZone,
+          config,
+        }),
+      );
+    }
+    const token = yield* Schema.decodeUnknownEffect(
+      Schema.fromJsonString(Schema.Struct({ access_token: Schema.NonEmptyString })),
+    )(tokenJson).pipe(Effect.mapError((cause) => fail("decode GCP metadata token", cause)));
+    yield* fetchText(
+      `suspend ${instanceName}`,
+      `${GCP_COMPUTE_API}/projects/${encodeURIComponent(config.project)}/zones/${encodeURIComponent(config.zone)}/instances/${encodeURIComponent(instanceName)}/suspend`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      },
+    );
+    yield* Effect.logInfo(`suspend requested for ${instanceName}`);
+  });
+
+const sleepHost = (provider: IdleConfig["provider"]) =>
+  provider.kind === "aws" ? hibernateAws(provider) : suspendGcp(provider);
 
 export const program = Effect.gen(function* () {
   const config = yield* readJson(CONFIG_PATH, IdleConfig);

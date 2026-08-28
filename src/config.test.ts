@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import { ConfigError, parseConfig } from "./config.ts";
 
 const valid = {
-  provider: "aws",
+  provider: "aws" as const,
   name: "dev",
   region: "us-east-1",
   instanceType: "m7i.4xlarge",
@@ -25,7 +25,7 @@ describe("CloudboxConfig", () => {
     Effect.gen(function* () {
       const config = yield* parseConfig("cloudbox.json", JSON.stringify(valid));
       expect(config.provider).toBe("aws");
-      expect(config.instanceType).toBe("m7i.4xlarge");
+      if (config.provider === "aws") expect(config.instanceType).toBe("m7i.4xlarge");
       expect(config.boxUser).toBe("dev");
     }),
   );
@@ -38,6 +38,31 @@ describe("CloudboxConfig", () => {
       );
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("instanceType");
+    }),
+  );
+
+  it.effect("hard-fails when required GCP values are missing", () =>
+    Effect.gen(function* () {
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({
+          ...valid,
+          provider: "gcp",
+          region: undefined,
+          instanceType: undefined,
+          diskGb: undefined,
+          gcp: {
+            project: "cloudbox-project",
+            zone: "us-central1-a",
+            machineType: "n2-standard-16",
+            bootDiskGb: 50,
+            dataDiskGb: 300,
+            dataDiskType: "pd-ssd",
+          },
+        }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("credentials");
     }),
   );
 

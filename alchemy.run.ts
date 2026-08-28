@@ -12,7 +12,9 @@ import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
 import { renderUserData } from "./src/bootstrap/render.ts";
-import { loadConfig, type CloudboxConfig } from "./src/config.ts";
+import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
+import { loadConfig } from "./src/config.ts";
+import * as GCP from "./src/gcp/index.ts";
 
 class DeploymentInputError extends Data.TaggedError("DeploymentInputError")<{
   readonly message: string;
@@ -46,7 +48,7 @@ const deploymentInputs = (config: CloudboxConfig) =>
       ),
     );
     const userData = renderUserData({ config, sshPublicKey, idleBundle });
-    if (Buffer.byteLength(userData, "utf8") > 16 * 1024) {
+    if (config.provider === "aws" && Buffer.byteLength(userData, "utf8") > 16 * 1024) {
       return yield* Effect.fail(
         new DeploymentInputError({
           message: "Rendered EC2 user data exceeds the 16 KiB launch limit",
@@ -58,85 +60,93 @@ const deploymentInputs = (config: CloudboxConfig) =>
 
 const awsProviders = Layer.unwrap(
   loadConfig("cloudbox.json").pipe(
-    Effect.map((config) => Layer.mergeAll(AWS.providers(), AWSRegion.of(config.region))),
+    Effect.map((config) =>
+      config.provider === "aws"
+        ? Layer.mergeAll(AWS.providers(), AWSRegion.of(config.region))
+        : Layer.empty,
+    ),
     Effect.orDie,
   ),
 );
 
-const makeInstanceTemplate = (config: CloudboxConfig, userData: string) =>
+const gcpProviders = Layer.unwrap(
+  loadConfig("cloudbox.json").pipe(
+    Effect.map((config) =>
+      config.provider === "gcp"
+        ? GCP.providers({ project: config.gcp.project, credentials: config.gcp.credentials })
+        : Layer.empty,
+    ),
+    Effect.orDie,
+  ),
+);
+
+const cloudProviders = Layer.merge(awsProviders, gcpProviders);
+
+const makeInstanceTemplate = (config: AwsCloudboxConfig, userData: string) =>
   JSON.stringify({
-  AWSTemplateFormatVersion: "2010-09-09",
-  Description: "Cloudbox hibernating personal development instance",
-  Parameters: {
-    ImageId: {
-      Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
-      Default: "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+    AWSTemplateFormatVersion: "2010-09-09",
+    Description: "Cloudbox hibernating personal development instance",
+    Parameters: {
+      ImageId: {
+        Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>",
+        Default: "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+      },
+      SubnetId: { Type: "AWS::EC2::Subnet::Id" },
+      SecurityGroupId: { Type: "AWS::EC2::SecurityGroup::Id" },
+      KeyName: { Type: "AWS::EC2::KeyPair::KeyName" },
+      InstanceProfileName: { Type: "String" },
+      RouteReady: { Type: "String" },
+      AssociationReady: { Type: "String" },
     },
-    SubnetId: { Type: "AWS::EC2::Subnet::Id" },
-    SecurityGroupId: { Type: "AWS::EC2::SecurityGroup::Id" },
-    KeyName: { Type: "AWS::EC2::KeyPair::KeyName" },
-    InstanceProfileName: { Type: "String" },
-    RouteReady: { Type: "String" },
-    AssociationReady: { Type: "String" },
-  },
-  Resources: {
-    Instance: {
-      Type: "AWS::EC2::Instance",
-      Properties: {
-        ImageId: { Ref: "ImageId" },
-        InstanceType: config.instanceType,
-        SubnetId: { Ref: "SubnetId" },
-        SecurityGroupIds: [{ Ref: "SecurityGroupId" }],
-        KeyName: { Ref: "KeyName" },
-        IamInstanceProfile: { Ref: "InstanceProfileName" },
-        HibernationOptions: { Configured: true },
-        BlockDeviceMappings: [
-          {
-            DeviceName: "/dev/sda1",
-            Ebs: {
-              VolumeType: "gp3",
-              VolumeSize: config.diskGb,
-              Encrypted: true,
-              DeleteOnTermination: true,
+    Resources: {
+      Instance: {
+        Type: "AWS::EC2::Instance",
+        Properties: {
+          ImageId: { Ref: "ImageId" },
+          InstanceType: config.instanceType,
+          SubnetId: { Ref: "SubnetId" },
+          SecurityGroupIds: [{ Ref: "SecurityGroupId" }],
+          KeyName: { Ref: "KeyName" },
+          IamInstanceProfile: { Ref: "InstanceProfileName" },
+          HibernationOptions: { Configured: true },
+          BlockDeviceMappings: [
+            {
+              DeviceName: "/dev/sda1",
+              Ebs: {
+                VolumeType: "gp3",
+                VolumeSize: config.diskGb,
+                Encrypted: true,
+                DeleteOnTermination: true,
+              },
             },
+          ],
+          MetadataOptions: {
+            HttpEndpoint: "enabled",
+            HttpTokens: "required",
+            HttpPutResponseHopLimit: 1,
           },
-        ],
-        MetadataOptions: {
-          HttpEndpoint: "enabled",
-          HttpTokens: "required",
-          HttpPutResponseHopLimit: 1,
+          UserData: { "Fn::Base64": userData },
+          Tags: [
+            { Key: "Name", Value: `cloudbox-${config.name}` },
+            { Key: "cloudbox", Value: config.name },
+            { Key: "cloudbox-route", Value: { Ref: "RouteReady" } },
+            { Key: "cloudbox-route-association", Value: { Ref: "AssociationReady" } },
+          ],
         },
-        UserData: { "Fn::Base64": userData },
-        Tags: [
-          { Key: "Name", Value: `cloudbox-${config.name}` },
-          { Key: "cloudbox", Value: config.name },
-          { Key: "cloudbox-route", Value: { Ref: "RouteReady" } },
-          { Key: "cloudbox-route-association", Value: { Ref: "AssociationReady" } },
-        ],
       },
     },
-  },
-  Outputs: {
-    InstanceId: { Value: { Ref: "Instance" } },
-    PublicIp: { Value: { "Fn::GetAtt": ["Instance", "PublicIp"] } },
-  },
-});
+    Outputs: {
+      InstanceId: { Value: { Ref: "Instance" } },
+      PublicIp: { Value: { "Fn::GetAtt": ["Instance", "PublicIp"] } },
+    },
+  });
 
-export default Alchemy.Stack(
-  "Cloudbox",
-  {
-    providers: awsProviders,
-    state: Alchemy.localState(),
-  },
+const deployAws = (config: AwsCloudboxConfig, sshPublicKey: string, userData: string) =>
   Effect.gen(function* () {
-    const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
-    const { sshPublicKey, userData } = yield* deploymentInputs(config).pipe(Effect.orDie);
-    const instanceTemplate = makeInstanceTemplate(config, userData);
     const actualRegion = yield* AWSRegion.CurrentRegion;
     yield* Schema.decodeUnknownEffect(Schema.Literal(config.region))(actualRegion).pipe(
       Effect.mapError((cause) => new Config.ConfigError(cause)),
     );
-
     const vpc = yield* AWS.EC2.Vpc("CloudboxVpc", {
       cidrBlock: "10.42.0.0/16",
       enableDnsSupport: true,
@@ -164,18 +174,13 @@ export default Alchemy.Stack(
     });
     const routeAssociation = yield* AWS.EC2.RouteTableAssociation(
       "CloudboxPublicRouteAssociation",
-      {
-        routeTableId: routeTable.routeTableId,
-        subnetId: subnet.subnetId,
-      },
+      { routeTableId: routeTable.routeTableId, subnetId: subnet.subnetId },
     );
-
     const keyPair = yield* AWS.EC2.KeyPair("CloudboxKeyPair", {
       publicKeyMaterial: sshPublicKey.trim(),
       keyType: "ed25519",
       tags: { cloudbox: config.name },
     });
-
     const securityGroup = yield* AWS.EC2.SecurityGroup("CloudboxSecurityGroup", {
       vpcId: vpc.vpcId,
       description: `SSH access for cloudbox ${config.name}`,
@@ -188,26 +193,13 @@ export default Alchemy.Stack(
           description: "SSH from configured CIDR only",
         },
       ],
-      egress: [
-        {
-          ipProtocol: "-1",
-          cidrIpv4: "0.0.0.0/0",
-          description: "Allow all outbound traffic",
-        },
-      ],
+      egress: [{ ipProtocol: "-1", cidrIpv4: "0.0.0.0/0", description: "Allow all outbound traffic" }],
       tags: { cloudbox: config.name },
     });
-
     const role = yield* AWS.IAM.Role("CloudboxInstanceRole", {
       assumeRolePolicyDocument: {
         Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Principal: { Service: "ec2.amazonaws.com" },
-            Action: ["sts:AssumeRole"],
-          },
-        ],
+        Statement: [{ Effect: "Allow", Principal: { Service: "ec2.amazonaws.com" }, Action: ["sts:AssumeRole"] }],
       },
       inlinePolicies: {
         HibernateTaggedCloudbox: {
@@ -217,23 +209,19 @@ export default Alchemy.Stack(
               Effect: "Allow",
               Action: ["ec2:StopInstances", "ec2:DescribeInstances"],
               Resource: "*",
-              Condition: {
-                StringEquals: { "aws:ResourceTag/cloudbox": config.name },
-              },
+              Condition: { StringEquals: { "aws:ResourceTag/cloudbox": config.name } },
             },
           ],
         },
       },
       tags: { cloudbox: config.name },
     });
-
     const profile = yield* AWS.IAM.InstanceProfile("CloudboxInstanceProfile", {
       roleName: role.roleName,
       tags: { cloudbox: config.name },
     });
-
     const instance = yield* AWS.CloudFormation.Stack("CloudboxInstance", {
-      templateBody: instanceTemplate,
+      templateBody: makeInstanceTemplate(config, userData),
       parameters: {
         SubnetId: subnet.subnetId,
         SecurityGroupId: securityGroup.groupId,
@@ -244,11 +232,61 @@ export default Alchemy.Stack(
       },
       tags: { cloudbox: config.name },
     });
-
     return {
       instanceId: instance.outputs.InstanceId,
       publicIp: instance.outputs.PublicIp,
       region: config.region,
     };
+  });
+
+const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, userData: string) =>
+  Effect.gen(function* () {
+    const instanceName = `cloudbox-${config.name}`;
+    const dataDiskName = `${instanceName}-data`;
+    const networkTag = instanceName;
+    yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
+      project: config.gcp.project,
+      name: `${instanceName}-ssh`,
+      sshCidr: config.sshCidr,
+      targetTag: networkTag,
+      cloudboxName: config.name,
+    });
+    const disk = yield* GCP.GcpDisk("CloudboxDataDisk", {
+      project: config.gcp.project,
+      zone: config.gcp.zone,
+      name: dataDiskName,
+      sizeGb: config.gcp.dataDiskGb,
+      type: config.gcp.dataDiskType,
+      cloudboxName: config.name,
+    });
+    const instance = yield* GCP.GcpInstance("CloudboxInstance", {
+      project: config.gcp.project,
+      zone: config.gcp.zone,
+      name: instanceName,
+      machineType: config.gcp.machineType,
+      bootDiskGb: config.gcp.bootDiskGb,
+      dataDiskName: disk.dataDiskName,
+      networkTag,
+      startupScript: userData,
+      sshPublicKey: sshPublicKey.trim(),
+      cloudboxName: config.name,
+    });
+    return {
+      instanceName: instance.instanceName,
+      zone: instance.zone,
+      externalIp: instance.externalIp,
+      dataDiskName: disk.dataDiskName,
+    };
+  });
+
+export default Alchemy.Stack(
+  "Cloudbox",
+  { providers: cloudProviders, state: Alchemy.localState() },
+  Effect.gen(function* () {
+    const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
+    const { sshPublicKey, userData } = yield* deploymentInputs(config).pipe(Effect.orDie);
+    return config.provider === "aws"
+      ? yield* deployAws(config, sshPublicKey, userData)
+      : yield* deployGcp(config, sshPublicKey, userData);
   }),
 );
