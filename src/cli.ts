@@ -28,6 +28,7 @@ import {
 import type { CloudboxConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
+  isRunningState,
   makeProviderLifecycle,
   type ProviderInstance,
   type ProviderLifecycle,
@@ -163,6 +164,69 @@ const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
 
 const requirePublicIp = (instance: BoxInstance) => requireString("public IP", instance.publicIp);
 
+const WakeServiceResponse = Schema.Struct({
+  state: Schema.Literals(["running", "resuming"]),
+});
+
+export const requestWakeViaService = (
+  name: string,
+  url: string,
+  secret: string,
+  fetchImpl: typeof fetch = fetch,
+) =>
+  Effect.gen(function* () {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(`${url.replace(/\/$/u, "")}/wake/${encodeURIComponent(name)}`);
+    } catch (cause) {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL is not a valid URL", cause),
+      );
+    }
+    if (endpoint.protocol !== "https:" && endpoint.hostname !== "localhost") {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL must use HTTPS"),
+      );
+    }
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetchImpl(endpoint, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${secret}`, Accept: "application/json" },
+        }),
+      catch: (cause) => cliError("wake service", "Wake service request failed", cause),
+    });
+    const text = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (cause) => cliError("wake service", "Could not read wake service response", cause),
+    });
+    if (!response.ok) {
+      return yield* Effect.fail(
+        cliError(
+          "wake service",
+          `Wake service returned HTTP ${String(response.status)}${text.length === 0 ? "" : `: ${text}`}`,
+        ),
+      );
+    }
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WakeServiceResponse))(text).pipe(
+      Effect.mapError((cause) =>
+        cliError("wake service", "Wake service returned an invalid response", cause),
+      ),
+    );
+  });
+
+const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const instance = yield* lifecycle.status;
+      if (isRunningState(lifecycle.provider, instance.state)) return instance;
+      yield* Effect.sleep("5 seconds");
+    }
+    return yield* Effect.fail(
+      cliError("wake service", "Instance did not reach RUNNING in 10 minutes"),
+    );
+  });
+
 const statusCommand = Command.make("status").pipe(
   Command.withDescription("Show the box state and public IP."),
   Command.withHandler(() =>
@@ -183,12 +247,40 @@ const statusCommand = Command.make("status").pipe(
   ),
 );
 
-const wakeCommand = Command.make("wake").pipe(
+const viaServiceFlag = Flag.boolean("via-service").pipe(
+  Flag.withDefault(false),
+  Flag.withDescription("Wake through the deployed Cloudflare Worker instead of direct GCP credentials."),
+);
+
+const wakeCommand = Command.make("wake", { viaService: viaServiceFlag }).pipe(
   Command.withDescription("Start or resume the box, wait for SSH, then print its IP."),
-  Command.withHandler(() =>
-    withBox((_config, lifecycle, _instance) =>
+  Command.withHandler(({ viaService }) =>
+    withBox((config, lifecycle, _instance) =>
       Effect.gen(function* () {
-        const running = yield* lifecycle.wake;
+        let running: BoxInstance;
+        if (viaService) {
+          if (config.provider !== "gcp") {
+            return yield* Effect.fail(
+              cliError("wake service", "--via-service is available only for GCP cloudboxes"),
+            );
+          }
+          const wakeUrl = process.env.CLOUDBOX_WAKE_URL?.trim();
+          const wakeSecret = process.env.CLOUDBOX_WAKE_SECRET?.trim();
+          if (wakeUrl === undefined || wakeUrl.length === 0) {
+            return yield* Effect.fail(
+              cliError("wake service", "CLOUDBOX_WAKE_URL is required with --via-service"),
+            );
+          }
+          if (wakeSecret === undefined || wakeSecret.length === 0) {
+            return yield* Effect.fail(
+              cliError("wake service", "CLOUDBOX_WAKE_SECRET is required with --via-service"),
+            );
+          }
+          yield* requestWakeViaService(config.name, wakeUrl, wakeSecret);
+          running = yield* waitForProviderRunning(lifecycle);
+        } else {
+          running = yield* lifecycle.wake;
+        }
         const publicIp = yield* requirePublicIp(running);
         yield* waitForSsh(publicIp);
         yield* Console.log(publicIp);

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import {
   buildRsyncArgs,
   CloudboxCliError,
+  requestWakeViaService,
   runIdentitySync,
   type IdentitySyncInput,
   type RsyncRunner,
@@ -24,6 +25,46 @@ const syncInput: IdentitySyncInput = {
   dryRun: false,
   force: false,
 };
+
+describe("cloudbox wake --via-service", () => {
+  it.effect("posts the configured bearer secret to the named wake endpoint", () =>
+    Effect.gen(function* () {
+      const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+      const fakeFetch: typeof fetch = async (input, init) => {
+        requests.push({ url: String(input), ...(init === undefined ? {} : { init }) });
+        return Response.json({ state: "resuming" }, { status: 202 });
+      };
+
+      const result = yield* requestWakeViaService(
+        "dev",
+        "https://wake.example.test/",
+        "test-secret",
+        fakeFetch,
+      );
+
+      expect(result.state).toBe("resuming");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://wake.example.test/wake/dev");
+      expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe(
+        "Bearer test-secret",
+      );
+    }),
+  );
+
+  it.effect("reports a rejected wake response", () =>
+    Effect.gen(function* () {
+      const error = yield* requestWakeViaService(
+        "dev",
+        "https://wake.example.test",
+        "wrong-secret",
+        async () => Response.json({ error: "unauthorized" }, { status: 401 }),
+      ).pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(CloudboxCliError);
+      expect(error.message).toContain("HTTP 401");
+    }),
+  );
+});
 
 describe("cloudbox sync", () => {
   it("builds directory-content rsync arguments without assuming the remote absolute home", () => {
