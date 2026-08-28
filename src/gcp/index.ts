@@ -4,6 +4,7 @@ export * from "./client.ts";
 export * from "./iam.ts";
 export * from "./platform.ts";
 export * from "./platformBodies.ts";
+export * from "./outputWiring.ts";
 export * from "./sourceArchive.ts";
 export * from "./providers.ts";
 export * from "./resources.ts";

@@ -409,7 +409,7 @@ const deployGcp = (
       value: wakeSecret,
       apiService: api["secretmanager.googleapis.com"]!,
     });
-    const wakeMember = `serviceAccount:${wakeServiceAccount.email}`;
+    const wakeMember = GCP.iamServiceAccountMember(wakeServiceAccount.email);
     const rateBucketBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeRateBucketIam", {
       target: "bucket",
       resourceName: rateBucket.bucketName,
