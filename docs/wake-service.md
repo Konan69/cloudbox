@@ -11,7 +11,7 @@ A running VM returns `200 {"state":"running"}`. A suspended or terminated VM rec
 
 ## Deploy authentication
 
-The relay reference stack uses Alchemy's Cloudflare provider login. Cloudbox uses the same provider. An interactive deploy can use:
+The relay reference stack uses Alchemy's Cloudflare provider login. Cloudbox uses the same provider. Alchemy stores its own OAuth credentials and does not reuse Wrangler's OAuth token. An interactive deploy can use:
 
 ```bash
 pnpm alchemy login --configure
@@ -22,10 +22,10 @@ For CI, set:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID=<dev's Cloudflare account ID>
-CLOUDFLARE_API_TOKEN=<token with Workers Scripts and Workers KV edit access>
+CLOUDFLARE_API_TOKEN=<account token>
 ```
 
-Google deployment authentication remains the configured ADC or `gcp.credentials.serviceAccountJsonPath`. There are no additional deploy-time wake environment variables.
+The token must grant exactly **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and **Account Settings: Read** on dev's account. Google deployment authentication remains the configured ADC or `gcp.credentials.serviceAccountJsonPath`. There are no additional deploy-time wake environment variables.
 
 ## Stack outputs and client configuration
 
@@ -48,7 +48,7 @@ export CLOUDBOX_WAKE_SECRET='<wakeSecret output>'
 pnpm cloudbox wake --via-service
 ```
 
-The bearer is generated once with `Alchemy.makeRandom`, stored as a Worker `secret_text` binding, and deliberately unwrapped into the local stack output because the client must receive it. Protect `.alchemy/state/` and terminal/deploy logs as credentials.
+The bearer is generated once with `Alchemy.makeRandom`, stored as a Worker `secret_text` binding, and mapped to plaintext only as a deferred stack output because the client must receive it. Protect `.alchemy/state/` and terminal/deploy logs as credentials.
 
 ## IAM scope and GCE label limitation
 

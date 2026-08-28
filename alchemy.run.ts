@@ -3,6 +3,7 @@ import * as Alchemy from "alchemy";
 import * as AWS from "alchemy/AWS";
 import * as AWSRegion from "alchemy/AWS/Region";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Output from "alchemy/Output";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -360,7 +361,7 @@ const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScrip
       wakeServiceAccount: wakeServiceAccount.email,
       wakeServiceAccountKey: wakeKey.name,
       wakeUrl: wakeWorker.url,
-      wakeSecret: Redacted.value(yield* yield* wakeSecret),
+      wakeSecret: wakeSecret.pipe(Output.map(Redacted.value)),
       wakeClientUrlEnv: "CLOUDBOX_WAKE_URL",
       wakeClientSecretEnv: "CLOUDBOX_WAKE_SECRET",
     };

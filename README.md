@@ -43,14 +43,14 @@ The laptop CLI uses the AWS SDK default credential chain. It supports the standa
 
 ### Cloudflare credentials
 
-A GCP deployment also creates the wake Worker and KV namespace. Like the reference relay stack, Alchemy can use credentials saved by `pnpm alchemy login --configure`. CI can instead set:
+A GCP deployment also creates the wake Worker and KV namespace. Alchemy can use OAuth credentials created by `pnpm alchemy login --configure`; it does **not** read Wrangler's separate OAuth login. For non-interactive deployment, set:
 
 ```text
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_API_TOKEN
 ```
 
-The token needs Workers Scripts and Workers KV edit access for the selected account. No Google or wake secret is supplied through the deploy environment: the stack creates the wake bearer secret and service-account key, binds both as Worker `secret_text` values, and returns the client values as stack outputs.
+Create the token for the selected account with exactly **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and **Account Settings: Read**. No Google or wake secret is supplied through the deploy environment: the stack creates the wake bearer secret and service-account key, binds both as Worker `secret_text` values, and returns the client values as stack outputs.
 
 ## GCP host
 
