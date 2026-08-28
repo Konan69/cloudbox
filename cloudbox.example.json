@@ -1,0 +1,29 @@
+{
+  "name": "dev",
+  "region": "us-east-1",
+  "instanceType": "m7i.4xlarge",
+  "diskGb": 300,
+  "sshCidr": "203.0.113.10/32",
+  "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
+  "idleMinutes": 30,
+  "t3": {
+    "repoUrl": "https://github.com/dev-mualim/t3code.git",
+    "branch": "main",
+    "githubTokenEnv": "CLOUDBOX_GITHUB_TOKEN"
+  },
+  "identity": {
+    "paths": [
+      "~/.claude",
+      "~/.codex",
+      "~/.pi/agent",
+      "~/.config/opencode",
+      "~/.config/gh"
+    ],
+    "excludes": [
+      ".pi/agent/sessions/",
+      ".pi/agent/pi-debug.log",
+      ".codex/sessions/"
+    ]
+  },
+  "boxUser": "dev"
+}
