@@ -248,6 +248,9 @@ phase_golden() {
 set -euo pipefail
 USER_NAME="$1"
 export DEBIAN_FRONTEND=noninteractive
+# incusbr0 has no IPv6 egress (GCE gives none); apt otherwise picks AAAA records
+# for archive.ubuntu.com and fails with "Network is unreachable".
+printf 'Acquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/99cloudbox-force-ipv4
 apt-get update
 apt-get install -y ca-certificates curl git gh rsync jq zstd build-essential python3 procps sudo
 
