@@ -1,0 +1,34 @@
+{
+  "provider": "gcp",
+  "name": "test",
+  "gcp": {
+    "project": "your-gcp-project-id",
+    "zone": "europe-west2-a",
+    "machineType": "n2-standard-2",
+    "bootDiskGb": 30,
+    "dataDiskGb": 50,
+    "dataDiskType": "pd-balanced",
+    "credentials": "adc"
+  },
+  "sshCidr": "203.0.113.10/32",
+  "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
+  "idleMinutes": 10,
+  "t3": {
+    "repoUrl": "https://github.com/example/t3code.git",
+    "branch": "main"
+  },
+  "identity": {
+    "paths": [
+      "~/.claude",
+      "~/.codex",
+      "~/.pi/agent",
+      "~/.config/opencode",
+      "~/.config/gh"
+    ],
+    "excludes": [
+      "sessions/",
+      "pi-debug.log"
+    ]
+  },
+  "boxUser": "dev"
+}

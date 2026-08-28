@@ -45,10 +45,13 @@ The laptop CLI uses the AWS SDK default credential chain. It supports the standa
 
 The GCP stack uses a custom Effect-native Alchemy provider and the Compute Engine REST API v1. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, and one Ubuntu 24.04 x86_64 instance. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
 
-Copy the GCP example:
+The host v2 Incus path requires an N2 machine type so KVM is available through `/dev/kvm`. The standard GCP example is the full host. `cloudbox.test.example.json` is the cheap test host: `n2-standard-2`, a 30 GB boot disk, and a 50 GB balanced data disk.
+
+Copy one GCP example:
 
 ```bash
-cp cloudbox.gcp.example.json cloudbox.json
+cp cloudbox.gcp.example.json cloudbox.json       # full host
+cp cloudbox.test.example.json cloudbox.json      # cheap test host
 ```
 
 For Application Default Credentials, configure either interactive ADC:
@@ -102,7 +105,7 @@ pnpm test
 pnpm cloudbox --help
 ```
 
-`dist/idle.mjs` is intentionally unbundled and small enough for user data. Bootstrap installs its pinned runtime dependencies under `/opt/cloudbox`. The laptop CLI is bundled to `dist/cli.mjs`.
+`dist/idle.mjs` is intentionally unbundled. GCP host bootstrap also embeds `dist/machines.mjs`; its compressed startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. Bootstrap installs pinned runtime dependencies under `/opt/cloudbox`. The laptop CLI is bundled to `dist/cli.mjs`.
 
 ## First run
 
@@ -217,12 +220,14 @@ Bootstrap is idempotent and writes:
 
 ```text
 /var/log/cloudbox-bootstrap.log
-/var/lib/cloudbox/bootstrapped
+/var/lib/cloudbox/bootstrapped                 # AWS v1
+/var/lib/cloudbox/host-v2-<phase>.done         # GCP host v2
 /etc/cloudbox/config.json
 /opt/cloudbox/idle.mjs
+/opt/cloudbox/machines.mjs                     # GCP host v2
 ```
 
-If the marker is absent, inspect the log:
+If the expected marker is absent, inspect the log:
 
 ```bash
 sudo tail -n 200 /var/log/cloudbox-bootstrap.log

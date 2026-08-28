@@ -1,7 +1,7 @@
 {
   "provider": "aws",
   "name": "dev",
-  "region": "us-east-1",
+  "region": "eu-west-2",
   "instanceType": "m7i.4xlarge",
   "diskGb": 300,
   "sshCidr": "203.0.113.10/32",

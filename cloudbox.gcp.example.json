@@ -3,7 +3,7 @@
   "name": "dev",
   "gcp": {
     "project": "your-gcp-project-id",
-    "zone": "us-central1-a",
+    "zone": "europe-west2-a",
     "machineType": "n2-standard-16",
     "bootDiskGb": 80,
     "dataDiskGb": 300,
