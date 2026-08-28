@@ -435,5 +435,8 @@ echo "cloudbox host bootstrap v2 completed"
  */
 export const renderHostStartupScript = (config: HostBootstrapConfig): string => {
   const compressed = gzipSync(Buffer.from(renderHostBootstrap(config), "utf8"), { level: 9 });
-  return `#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s' '${compressed.toString("base64")}' | base64 --decode | gzip --decompress | bash\n`;
+  // Write the script to a file and run it with stdin detached. Piping it into
+  // `bash` makes every child process share the script text as its stdin
+  // (incus parses that as instance YAML; curl|bash installers misbehave).
+  return `#!/usr/bin/env bash\nset -euo pipefail\ninstall -d -m 700 /var/lib/cloudbox\nprintf '%s' '${compressed.toString("base64")}' | base64 --decode | gzip --decompress > /var/lib/cloudbox/host-bootstrap.sh\nchmod 700 /var/lib/cloudbox/host-bootstrap.sh\nexec bash /var/lib/cloudbox/host-bootstrap.sh </dev/null\n`;
 };
