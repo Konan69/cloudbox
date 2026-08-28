@@ -41,6 +41,17 @@ AWS_ACCOUNT_ID          # optional; otherwise resolved with STS
 
 The laptop CLI uses the AWS SDK default credential chain. It supports the standard `AWS_*` variables, `AWS_PROFILE`, shared AWS config/credentials files, SSO, and other normal SDK sources.
 
+### Cloudflare credentials
+
+A GCP deployment also creates the wake Worker and KV namespace. Like the reference relay stack, Alchemy can use credentials saved by `pnpm alchemy login --configure`. CI can instead set:
+
+```text
+CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_API_TOKEN
+```
+
+The token needs Workers Scripts and Workers KV edit access for the selected account. No Google or wake secret is supplied through the deploy environment: the stack creates the wake bearer secret and service-account key, binds both as Worker `secret_text` values, and returns the client values as stack outputs.
+
 ## GCP host
 
 The GCP stack uses a custom Effect-native Alchemy provider and the Compute Engine REST API v1. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, and one Ubuntu 24.04 x86_64 instance. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
@@ -66,9 +77,12 @@ or set `gcp.credentials` to a service-account key file:
 "credentials": { "serviceAccountJsonPath": "~/.config/gcloud/cloudbox.json" }
 ```
 
-The deploying principal needs:
+The deploying principal needs permissions to manage Compute Engine, project custom roles, service accounts and service-account keys, plus instance IAM policies. In practice, use:
 
 - `roles/compute.instanceAdmin.v1`
+- `roles/iam.roleAdmin`
+- `roles/iam.serviceAccountAdmin`
+- `roles/iam.serviceAccountKeyAdmin`
 - `roles/iam.serviceAccountUser` for the instance service account
 
 Check that the organization policy does not disable nested virtualization:
@@ -80,6 +94,8 @@ gcloud org-policies describe constraints/compute.disableNestedVirtualization \
 
 The instance uses the default service account with the Compute OAuth scope. That service account needs `compute.instances.suspend` on this instance (normally through a narrow custom role and IAM condition). Without it, automatic idle suspend fails.
 
+The stack also creates `cloudbox-wake@<project>.iam.gserviceaccount.com`, a project custom role, and an IAM binding on the exact VM. Compute Engine instance labels are **not** IAM Conditions attributes; Resource Manager tags are. Cloudbox therefore verifies `cloudbox=<name>` before reconciliation, then attaches the role to the instance-level IAM policy instead of granting it project-wide. The role contains `compute.instances.get`, `compute.instances.resume`, and `compute.instances.start`; `start` is required for the documented `TERMINATED` behavior. See [docs/wake-service.md](docs/wake-service.md).
+
 GCE suspend preserves memory, but supports only instances with at most 208 GB RAM and no GPU. A suspended instance is automatically terminated after 60 days. In-guest suspend commands are ignored by GCE; Cloudbox calls `instances.suspend` through the Compute API. The external IP may change after resume.
 
 ## Configure
@@ -90,7 +106,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, `wakeKeyRotation`, and credentials. Increment `wakeKeyRotation` to rotate the Worker service-account key. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
@@ -126,10 +142,13 @@ pnpm cloudbox --help
    pnpm deploy
    ```
 
-2. Wake the instance and wait for SSH:
+2. Wake the instance and wait for SSH. Direct GCP credentials remain the default; the second form tests the deployed Worker path:
 
    ```bash
    pnpm cloudbox wake
+   export CLOUDBOX_WAKE_URL='<wakeUrl output>'
+   export CLOUDBOX_WAKE_SECRET='<wakeSecret output>'
+   pnpm cloudbox wake --via-service
    ```
 
 3. Preview and then perform identity sync:
@@ -173,7 +192,7 @@ pnpm cloudbox sync
 pnpm cloudbox sync --force
 pnpm cloudbox ssh
 pnpm cloudbox verify --host <ip> [--expect-vm] [--json]
-pnpm cloudbox smoke-thread --host <ip> [--timeout 240]
+pnpm cloudbox smoke-thread --host <ip> [--timeout 240] [--keep-project]
 pnpm cloudbox verify-sleep [--timeout 1800] [--json]
 pnpm cloudbox verify-idle [--timeout 1800] [--json]
 ```
@@ -181,12 +200,12 @@ pnpm cloudbox verify-idle [--timeout 1800] [--json]
 | Command | Behavior |
 |---|---|
 | `status` | Prints provider, instance ID/name, cloud state, and current public IP. |
-| `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. Then waits for TCP 22 and prints the IP. |
+| `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. `--via-service` uses `CLOUDBOX_WAKE_URL` and `CLOUDBOX_WAKE_SECRET`. Then waits for TCP 22 and prints the IP. |
 | `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
 | `sync` | Shows rsync names/stats per path. Real transfers run a dry-run size guard first; `--force` overrides `maxTransferMb`. |
 | `ssh` | Opens `ssh dev@<current-public-ip>`. |
 | `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
-| `smoke-thread` | Creates a host-local T3 project/thread, runs autonomous pi and Codex turns, validates their output, then deletes the threads. |
+| `smoke-thread` | Enables/configures pi through the environment API, runs autonomous pi and Codex turns, validates output, then deletes smoke threads and (unless `--keep-project`) the project. |
 | `verify-sleep` | Sleeps and wakes through the configured provider, then proves uptime and a marker PID survived. |
 | `verify-idle` | Leaves the host untouched for `idleMinutes + 5` and verifies provider sleep. |
 
@@ -219,6 +238,8 @@ The service runs:
 The persistent T3-managed `cloudflared` helper is excluded from the child-process test; otherwise merely pairing the relay would prevent hibernation forever. Active relay traffic still appears as an established connection to port 3773.
 
 The idle streak is stored in `/var/lib/cloudbox/idle.json`. At `idleMinutes`, AWS gets its instance ID with an IMDSv2 token and calls `StopInstances(Hibernate=true)`. GCP reads project, zone, instance name, and an access token from `metadata.google.internal`, then calls `instances.suspend` on itself. Busy detection is shared.
+
+Each tick records wall-clock time. A gap larger than three timer intervals is treated as a resume clock jump: the idle streak resets and suspension is blocked for another `idleMinutes`. This gives T3 and cloudflared time to reconnect before the host can suspend again.
 
 Force the box awake during unattended work:
 
@@ -255,6 +276,6 @@ systemctl --user status t3code-fork.service --no-pager
 sudo systemctl status cloudbox-idle.timer --no-pager
 ```
 
-## Future work
+## Wake-on-connect boundary
 
-Add relay wake-on-connect so a connection request can start or resume the sleeping instance. This version makes no relay changes.
+This repository now owns the GCP IAM, wake Worker, host grace, and `cloudbox wake --via-service` path. The dev T3 fork still owns the explicit one-shot client intent that calls the `wakeUrl`; the hosted T3 relay is unchanged.
