@@ -111,7 +111,12 @@ const hasBusyProcess = (rows: ReadonlyArray<ProcessRow>): boolean => {
       )
       .map((row) => row.pid),
   );
-  return rows.some((row) => t3Pids.has(row.ppid));
+  return rows.some(
+    (row) =>
+      t3Pids.has(row.ppid) &&
+      row.command !== "cloudflared" &&
+      !row.args.includes("/cloudflared/"),
+  );
 };
 
 const readJson = <S extends Schema.Top>(path: string, schema: S) =>
