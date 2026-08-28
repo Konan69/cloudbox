@@ -1,44 +1,104 @@
-# GCP wake service
+# GCP Cloud Run wake service
 
-The GCP stack deploys an authenticated Cloudflare Worker at:
+The GCP stack deploys an authenticated Cloud Run service in the same project and region as the VM:
 
 ```text
 POST <wakeUrl>/wake/<cloudbox name>
 Authorization: Bearer <wakeSecret>
 ```
 
-A running VM returns `200 {"state":"running"}`. A suspended or terminated VM receives `instances.resume` or `instances.start` and returns `202 {"state":"resuming"}`. KV coalesces subsequent state-change requests for that name for 60 seconds. Every accepted, rejected, coalesced, and failed wake is written to Worker logs without logging the bearer or Google key.
+A running VM returns `200 {"state":"running"}`. A suspended or terminated VM receives `instances.resume` or `instances.start` and returns `202 {"state":"resuming"}`. The service logs every accepted, rejected, coalesced, and failed wake without logging the bearer.
 
-## Deploy authentication
+## Build and deployment path
 
-The relay reference stack uses Alchemy's Cloudflare provider login. Cloudbox uses the same provider. Alchemy stores its own OAuth credentials and does not reuse Wrangler's OAuth token. An interactive deploy can use:
+Cloud Run Admin API v2 services ultimately run a container image. Cloudbox uses the stable, explicit API path rather than the preview direct-source runtime:
 
-```bash
-pnpm alchemy login --configure
-pnpm deploy
-```
+1. `pnpm build:wake` bundles `src/wake/server.ts` into the self-contained `dist/wake-service.mjs`.
+2. The stack creates a deterministic `.tar.gz` containing that bundle and a Node 24 Dockerfile.
+3. A custom `GcpStorageObject` uploads the archive to the stack-owned source bucket.
+4. A custom `GcpCloudBuild` submits `projects.locations.builds.create` and polls its long-running operation. Docker builds and pushes a content-addressed tag to the stack-owned Artifact Registry repository.
+5. A custom `GcpCloudRunService` creates or updates the Cloud Run Admin API v2 service with that image.
 
-For CI, set:
+No `gcloud`, Wrangler, external registry, or second Alchemy provider is used. Google also offers a preview Cloud Run `sourceCode.cloudStorageSource` no-build API, but this stack deliberately uses the stable Cloud Build plus Artifact Registry flow.
+
+## Runtime identity and secrets
+
+The Cloud Run revision runs as:
 
 ```text
-CLOUDFLARE_ACCOUNT_ID=<dev's Cloudflare account ID>
-CLOUDFLARE_API_TOKEN=<account token>
+cloudbox-wake@<project>.iam.gserviceaccount.com
 ```
 
-The token must grant exactly **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and **Account Settings: Read** on dev's account. Google deployment authentication remains the configured ADC or `gcp.credentials.serviceAccountJsonPath`. There are no additional deploy-time wake environment variables.
+The service obtains short-lived OAuth access tokens from the Cloud Run metadata server. The stack never creates, downloads, stores, or exports a service-account key.
 
-## Stack outputs and client configuration
+`WAKE_SECRET` is generated once by Alchemy, written to Secret Manager as a secret version, and injected into Cloud Run with a secret environment-value reference. The service account receives `roles/secretmanager.secretAccessor` only on that secret. The client bearer is deliberately returned as the `wakeSecret` stack output; protect `.alchemy/state/` and deploy logs.
 
-A successful GCP deploy prints and persists these outputs:
+## Persistent 60-second coalescing
+
+A dedicated GCS bucket stores one object at `wake-rate/<name>`. Each claim uses GCS generation preconditions:
+
+- create uses `ifGenerationMatch=0`;
+- update uses the observed object generation;
+- HTTP 412 means another request won the race and is returned as a coalesced `202`.
+
+This makes the one-resume-per-60-seconds decision survive cold starts and remain atomic across concurrent Cloud Run instances. The runtime service account receives `roles/storage.objectAdmin` only on this dedicated bucket.
+
+## APIs
+
+The stack enables these APIs with custom `GcpProjectService` resources:
+
+```text
+run.googleapis.com
+cloudbuild.googleapis.com
+artifactregistry.googleapis.com
+secretmanager.googleapis.com
+storage.googleapis.com
+```
+
+`serviceusage.googleapis.com` must already be enabled so the stack can enable the others.
+
+## IAM required to deploy
+
+The ADC principal needs these project roles, or equivalent custom permissions:
+
+```text
+roles/compute.instanceAdmin.v1
+roles/iam.roleAdmin
+roles/iam.serviceAccountAdmin
+roles/iam.serviceAccountUser
+roles/serviceusage.serviceUsageAdmin
+roles/storage.admin
+roles/artifactregistry.admin
+roles/cloudbuild.builds.editor
+roles/secretmanager.admin
+roles/run.admin
+```
+
+The deployer also needs `iam.serviceAccounts.actAs` on `cloudbox-wake` when Cloud Run attaches that service identity.
+
+Cloud Build's default build identity must be able to read the source object, run builds, write build logs, and push to the same-project repository. Grant the project's selected default Cloud Build service account `roles/cloudbuild.builds.builder` if organization policy no longer grants that role automatically. Google may select either the Compute Engine default service account or the legacy Cloud Build service account; check the project's Cloud Build default-service-account setting before the first deploy.
+
+## Instance IAM scope
+
+The project custom role contains:
+
+```text
+compute.instances.get
+compute.instances.resume
+compute.instances.start
+```
+
+GCE labels are not IAM Conditions attributes. The provider first fetches the VM and refuses reconciliation unless `labels.cloudbox == <name>`, then attaches this role to that exact VM's instance-level IAM policy. `compute.instances.start` is required for the endpoint's documented `TERMINATED` behavior.
+
+## Stack outputs
 
 | Output | Client use |
 |---|---|
-| `wakeUrl` | Set as `CLOUDBOX_WAKE_URL`. The fork calls `<wakeUrl>/wake/<name>`. |
-| `wakeSecret` | Set as `CLOUDBOX_WAKE_SECRET`. This value is sensitive. |
-| `wakeClientUrlEnv` | Literal output documenting `CLOUDBOX_WAKE_URL`. |
-| `wakeClientSecretEnv` | Literal output documenting `CLOUDBOX_WAKE_SECRET`. |
-| `wakeServiceAccount` | Operational identity; clients do not need it. |
-| `wakeServiceAccountKey` | Google key resource name; clients do not need it. |
+| `wakeUrl` | Set as `CLOUDBOX_WAKE_URL`. |
+| `wakeSecret` | Set as `CLOUDBOX_WAKE_SECRET`. Sensitive. |
+| `wakeClientUrlEnv` | Literal `CLOUDBOX_WAKE_URL`. |
+| `wakeClientSecretEnv` | Literal `CLOUDBOX_WAKE_SECRET`. |
+| `wakeServiceAccount` | Operational output; clients do not need it. |
 
 Test the same endpoint used by the fork:
 
@@ -48,46 +108,8 @@ export CLOUDBOX_WAKE_SECRET='<wakeSecret output>'
 pnpm cloudbox wake --via-service
 ```
 
-The bearer is generated once with `Alchemy.makeRandom`, stored as a Worker `secret_text` binding, and mapped to plaintext only as a deferred stack output because the client must receive it. Protect `.alchemy/state/` and terminal/deploy logs as credentials.
-
-## IAM scope and GCE label limitation
-
-The stack creates:
-
-- service account `cloudbox-wake@<project>.iam.gserviceaccount.com`;
-- project custom role `cloudboxWake` with `compute.instances.get`, `compute.instances.resume`, and `compute.instances.start`;
-- an instance-level IAM binding for that role on `cloudbox-<name>`.
-
-GCE **labels cannot be read by IAM Conditions**. IAM Conditions support resource name/type/service and Resource Manager tags, while Compute Engine's `resource.labels` field belongs to organization-policy custom constraints. Cloudbox therefore does not claim a label condition that Google IAM cannot enforce. Its provider first fetches the VM and refuses reconciliation unless `labels.cloudbox == <name>`, then writes the role binding to that exact VM's IAM policy. The role exists at project scope because custom roles do, but its permissions are granted only on the one instance.
-
-`compute.instances.start` is included because the endpoint must start a `TERMINATED` VM. A role containing only `get` and `resume` cannot implement that required behavior.
-
-References:
-
-- [Managing access to Compute Engine resources](https://cloud.google.com/compute/docs/access/managing-access-to-resources)
-- [IAM Conditions attribute reference](https://cloud.google.com/iam/docs/conditions-attribute-reference)
-- [`instances.resume` required permission](https://cloud.google.com/compute/docs/reference/rest/v1/instances/resume)
-
-## Why the Worker has a Google key
-
-Cloud Run can use an attached service account without a downloadable key. Cloudflare Workers cannot use that metadata-server flow, and this Worker has no trusted OIDC issuer configured for Google Workload Identity Federation. The stack therefore creates one user-managed service-account key and stores the credentials JSON only in local Alchemy state and a Worker secret binding.
-
-Google user-managed service-account keys do not have a configurable short lifetime. Rotate instead of treating this key as short-lived:
-
-1. Increment `gcp.wakeKeyRotation` in `cloudbox.json`.
-2. Run `pnpm deploy`.
-
-Alchemy replaces the key, updates the Worker secret, and then deletes the prior key. This is the exact rotation command:
-
-```bash
-pnpm deploy
-```
-
-Do not create or copy this key into the fork, desktop app, or mobile app. They receive only `wakeUrl` and `wakeSecret`.
-
 ## Assumptions
 
-- One Cloudbox is deployed per GCP project because the requested service-account ID is fixed as `cloudbox-wake`.
-- The Cloudflare account has a `workers.dev` subdomain enabled; no custom wake domain is configured.
-- The endpoint is intentionally a private single-owner bearer service. A later multi-user product should replace the bearer with owner-bound Clerk/DPoP authorization.
-- Workers KV is eventually consistent. It suppresses ordinary repeat calls; concurrent cross-region requests can still race, while Compute Engine state transitions remain idempotent in practice.
+- One Cloudbox is deployed per GCP project because the service-account ID and Artifact Registry repository are fixed as `cloudbox-wake`.
+- The configured zone's parent region supports Cloud Run, Cloud Build regional builds, and Artifact Registry.
+- Project policy permits `allUsers` to receive `roles/run.invoker`; application-level bearer authentication remains mandatory.

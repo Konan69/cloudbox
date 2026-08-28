@@ -387,7 +387,7 @@ The repository’s `replicas: 2`, queues, observability, Clerk, and APNs make th
 
 ### GCP deployment — wake service and host grace
 
-> **Implemented infrastructure note:** Cloudbox now deploys this service as a Cloudflare Worker from its own Alchemy stack; see [wake-service.md](wake-service.md). Workers cannot use Cloud Run's attached-service-account metadata flow, so the deployed variant uses a dedicated `cloudbox-wake` service-account key in a Worker secret. It binds the custom role on the exact VM after verifying `cloudbox=<name>`, because GCE labels are not IAM Conditions attributes.
+> **Implemented infrastructure note:** Cloudbox now deploys this service as Cloud Run in the VM's GCP project; see [wake-service.md](wake-service.md). The revision runs as `cloudbox-wake`, gets short-lived tokens from the metadata server, and receives no downloadable key. It binds the compute role on the exact VM after verifying `cloudbox=<name>`, because GCE labels are not IAM Conditions attributes.
 
 **Scope:** 100–180 LOC/IaC outside this repository. **Risk:** medium.
 
@@ -403,7 +403,7 @@ The repository’s `replicas: 2`, queues, observability, Clerk, and APNs make th
 
 ## 6. Minimal GCP wake service (plain TypeScript)
 
-This is the recommended multi-user Cloud Run design, not the private Worker now deployed by Cloudbox. The implemented Worker uses a per-environment bearer plus a service-account key as specified in [wake-service.md](wake-service.md).
+This is the recommended multi-user authentication design. The private Cloud Run service deployed by Cloudbox keeps the same compute and metadata-token shape but uses a per-environment bearer as specified in [wake-service.md](wake-service.md).
 
 This sketch uses a Clerk JWT plus a DPoP proof. It intentionally does not accept a static bearer secret and does not carry a service-account key. Cloud Run obtains an OAuth token from its attached service account.
 

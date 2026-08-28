@@ -41,20 +41,9 @@ AWS_ACCOUNT_ID          # optional; otherwise resolved with STS
 
 The laptop CLI uses the AWS SDK default credential chain. It supports the standard `AWS_*` variables, `AWS_PROFILE`, shared AWS config/credentials files, SSO, and other normal SDK sources.
 
-### Cloudflare credentials
-
-A GCP deployment also creates the wake Worker and KV namespace. Alchemy can use OAuth credentials created by `pnpm alchemy login --configure`; it does **not** read Wrangler's separate OAuth login. For non-interactive deployment, set:
-
-```text
-CLOUDFLARE_ACCOUNT_ID
-CLOUDFLARE_API_TOKEN
-```
-
-Create the token for the selected account with exactly **Workers Scripts: Edit**, **Workers KV Storage: Edit**, and **Account Settings: Read**. No Google or wake secret is supplied through the deploy environment: the stack creates the wake bearer secret and service-account key, binds both as Worker `secret_text` values, and returns the client values as stack outputs.
-
 ## GCP host
 
-The GCP stack uses a custom Effect-native Alchemy provider and the Compute Engine REST API v1. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, and one Ubuntu 24.04 x86_64 instance. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
+The GCP stack uses a custom Effect-native Alchemy provider and Google REST APIs through the configured ADC. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, one Ubuntu 24.04 x86_64 instance, and the Cloud Run wake service with its GCS, Artifact Registry, Cloud Build, and Secret Manager resources. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
 
 The host v2 Incus path requires an N2 machine type so KVM is available through `/dev/kvm`. The standard GCP example is the full host. `cloudbox.test.example.json` is the cheap test host: `n2-standard-2`, a 30 GB boot disk, and a 50 GB balanced data disk.
 
@@ -77,13 +66,7 @@ or set `gcp.credentials` to a service-account key file:
 "credentials": { "serviceAccountJsonPath": "~/.config/gcloud/cloudbox.json" }
 ```
 
-The deploying principal needs permissions to manage Compute Engine, project custom roles, service accounts and service-account keys, plus instance IAM policies. In practice, use:
-
-- `roles/compute.instanceAdmin.v1`
-- `roles/iam.roleAdmin`
-- `roles/iam.serviceAccountAdmin`
-- `roles/iam.serviceAccountKeyAdmin`
-- `roles/iam.serviceAccountUser` for the instance service account
+The deploying principal needs permissions to manage Compute Engine, project custom roles, service accounts, enabled APIs, Cloud Storage, Artifact Registry, Cloud Build, Secret Manager, and Cloud Run. See [docs/wake-service.md](docs/wake-service.md) for the exact roles and the Cloud Build service-account prerequisite. No downloadable runtime key is created.
 
 Check that the organization policy does not disable nested virtualization:
 
@@ -106,7 +89,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, `wakeKeyRotation`, and credentials. Increment `wakeKeyRotation` to rotate the Worker service-account key. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
@@ -130,7 +113,7 @@ pnpm check:bootstrap
 pnpm cloudbox --help
 ```
 
-`dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. The GCP bootstrap embeds gzip-compressed copies, and its startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`.
+`dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. The GCP bootstrap embeds gzip-compressed copies, and its startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`; the Cloud Run source archive contains the self-contained `dist/wake-service.mjs` bundle.
 
 ## First run
 
@@ -142,7 +125,7 @@ pnpm cloudbox --help
    pnpm deploy
    ```
 
-2. Wake the instance and wait for SSH. Direct GCP credentials remain the default; the second form tests the deployed Worker path:
+2. Wake the instance and wait for SSH. Direct GCP credentials remain the default; the second form tests the deployed Cloud Run path:
 
    ```bash
    pnpm cloudbox wake
@@ -278,4 +261,4 @@ sudo systemctl status cloudbox-idle.timer --no-pager
 
 ## Wake-on-connect boundary
 
-This repository now owns the GCP IAM, wake Worker, host grace, and `cloudbox wake --via-service` path. The dev T3 fork still owns the explicit one-shot client intent that calls the `wakeUrl`; the hosted T3 relay is unchanged.
+This repository now owns the GCP IAM, Cloud Run wake service, host grace, and `cloudbox wake --via-service` path. The dev T3 fork still owns the explicit one-shot client intent that calls the `wakeUrl`; the hosted T3 relay is unchanged.
