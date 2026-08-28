@@ -86,6 +86,9 @@ phase_host_packages() {
 
   install -d -m 755 /etc/apt/keyrings
   curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+  # apt fetches run as the unprivileged _apt user; a 0640 keyring yields
+  # "Unknown error executing apt-key" and "repository is not signed".
+  chmod 0644 /etc/apt/keyrings/zabbly.asc
   . /etc/os-release
   cat > /etc/apt/sources.list.d/zabbly-incus-stable.sources <<EOF
 Enabled: yes
