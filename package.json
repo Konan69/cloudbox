@@ -9,7 +9,7 @@
   "scripts": {
     "build": "pnpm build:cli && pnpm build:idle",
     "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/cli.mjs --banner:js='import { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);'",
-    "build:idle": "esbuild src/box/idle.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/idle.mjs --banner:js='import { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);'",
+    "build:idle": "esbuild src/box/idle.ts --platform=node --format=esm --target=node24 --outfile=dist/idle.mjs",
     "deploy": "alchemy deploy",
     "destroy": "alchemy destroy",
     "test": "vitest run",
