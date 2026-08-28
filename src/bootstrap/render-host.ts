@@ -114,6 +114,34 @@ EOF
   usermod -aG docker,incus-admin "$BOX_USER"
   systemctl enable --now docker incus
 
+  # Docker sets the iptables FORWARD policy to DROP, which silently kills the
+  # incus bridge NAT (machines get no egress). DOCKER-USER is the sanctioned
+  # place for our allow rules; the oneshot unit re-applies them after every boot.
+  cat > /usr/local/sbin/cloudbox-incus-nat <<'NAT'
+#!/usr/bin/env bash
+set -euo pipefail
+for direction in -i -o; do
+  iptables -C DOCKER-USER "$direction" incusbr0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER "$direction" incusbr0 -j ACCEPT
+done
+NAT
+  chmod 755 /usr/local/sbin/cloudbox-incus-nat
+  cat > /etc/systemd/system/cloudbox-incus-nat.service <<'UNIT'
+[Unit]
+Description=Allow incus bridge traffic through Docker's FORWARD chain
+After=docker.service incus.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cloudbox-incus-nat
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now cloudbox-incus-nat
+
   if ! command -v node >/dev/null 2>&1 || [[ "$(node --version)" != v24.* ]]; then
     curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     apt-get install -y nodejs
