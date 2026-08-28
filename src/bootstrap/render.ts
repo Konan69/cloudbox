@@ -21,10 +21,15 @@ const AGENT_PACKAGES = [
 export const renderBootstrap = ({ config, sshPublicKey, idleBundle }: BootstrapInput): string => {
   const boxConfig = JSON.stringify(
     {
-      name: config.name,
-      region: config.region,
+      provider: {
+        kind: "aws",
+        name: config.name,
+        region: config.region,
+      },
       idleMinutes: config.idleMinutes,
       t3Port: 3773,
+      t3Activity: { kind: "tcp" },
+      checkIncus: false,
     },
     null,
     2,
