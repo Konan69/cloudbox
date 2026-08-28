@@ -32,6 +32,10 @@ const CLOUD_RESOURCE_MANAGER_API = "https://cloudresourcemanager.googleapis.com/
 const EmptyResponse = Schema.Unknown;
 const Labels = Schema.Record(Schema.String, Schema.String);
 const ServiceUsageResponse = Schema.Struct({ name: Schema.NonEmptyString, state: Schema.NonEmptyString });
+export const GcpProjectResponse = Schema.Struct({
+  projectId: Schema.NonEmptyString,
+  projectNumber: Schema.NonEmptyString,
+});
 const BucketResponse = Schema.Struct({
   name: Schema.NonEmptyString,
   location: Schema.NonEmptyString,
@@ -100,11 +104,23 @@ export interface GcpProjectServiceProps {
 export type GcpProjectService = Resource<
   "GCP.ServiceUsage.ProjectService",
   GcpProjectServiceProps,
-  { readonly serviceName: string; readonly projectNumber: string },
+  { readonly serviceName: string },
   never,
   Providers
 >;
 export const GcpProjectService = Resource<GcpProjectService>("GCP.ServiceUsage.ProjectService");
+
+export interface GcpProjectInfoProps {
+  readonly project: string;
+}
+export type GcpProjectInfo = Resource<
+  "GCP.ResourceManager.ProjectInfo",
+  GcpProjectInfoProps,
+  { readonly projectId: string; readonly projectNumber: string },
+  never,
+  Providers
+>;
+export const GcpProjectInfo = Resource<GcpProjectInfo>("GCP.ResourceManager.ProjectInfo");
 
 export interface GcpStorageBucketProps {
   readonly project: string;
@@ -234,12 +250,9 @@ export type GcpResourceIamBinding = Resource<
 >;
 export const GcpResourceIamBinding = Resource<GcpResourceIamBinding>("GCP.IAM.ResourceBinding");
 
-const serviceProjectNumber = (serviceName: string): string =>
-  serviceName.split("/")[1] ?? serviceName;
-
 export const GcpProjectServiceProvider = (api: GcpApi) =>
   Provider.succeed(GcpProjectService, {
-    stables: ["serviceName", "projectNumber"],
+    stables: ["serviceName"],
     diff: Effect.fn(function* ({ olds, news }) {
       if (!isResolved(news)) return undefined;
       if (olds === undefined) return { action: "update" } as const;
@@ -249,9 +262,7 @@ export const GcpProjectServiceProvider = (api: GcpApi) =>
       if (olds === undefined) return undefined;
       const name = output?.serviceName ?? `projects/${olds.project}/services/${olds.service}`;
       const service = yield* api.requestOptional(`get API ${olds.service}`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
-      return service?.state === "ENABLED"
-        ? { serviceName: service.name, projectNumber: serviceProjectNumber(service.name) }
-        : undefined;
+      return service?.state === "ENABLED" ? { serviceName: service.name } : undefined;
     }),
     reconcile: Effect.fn(function* ({ news }) {
       const name = `projects/${news.project}/services/${news.service}`;
@@ -263,10 +274,7 @@ export const GcpProjectServiceProvider = (api: GcpApi) =>
       for (let poll = 0; poll < 90; poll += 1) {
         current = yield* api.request(`confirm API ${news.service} is enabled`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
         if (current.state === "ENABLED") {
-          return {
-            serviceName: current.name,
-            projectNumber: serviceProjectNumber(current.name),
-          };
+          return { serviceName: current.name };
         }
         yield* Effect.sleep(Duration.seconds(2));
       }
@@ -276,6 +284,36 @@ export const GcpProjectServiceProvider = (api: GcpApi) =>
           message: `${news.service} did not report ENABLED within 3 minutes`,
         }),
       );
+    }),
+    delete: () => Effect.void,
+  });
+
+const getProjectInfo = (api: GcpApi, project: string) =>
+  api.request(
+    `get project ${project}`,
+    `/projects/${encodeURIComponent(project)}`,
+    GcpProjectResponse,
+    { baseUrl: CLOUD_RESOURCE_MANAGER_API },
+  );
+
+export const GcpProjectInfoProvider = (api: GcpApi) =>
+  Provider.succeed(GcpProjectInfo, {
+    stables: ["projectId", "projectNumber"],
+    diff: Effect.fn(function* ({ olds, news }) {
+      if (!isResolved(news)) return undefined;
+      if (olds === undefined) return { action: "update" } as const;
+      return olds.project === news.project
+        ? undefined
+        : { action: "replace", deleteFirst: false } as const;
+    }),
+    read: Effect.fn(function* ({ olds }) {
+      if (olds === undefined) return undefined;
+      const project = yield* getProjectInfo(api, olds.project);
+      return { projectId: project.projectId, projectNumber: project.projectNumber };
+    }),
+    reconcile: Effect.fn(function* ({ news }) {
+      const project = yield* getProjectInfo(api, news.project);
+      return { projectId: project.projectId, projectNumber: project.projectNumber };
     }),
     delete: () => Effect.void,
   });

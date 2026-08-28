@@ -1,5 +1,3 @@
-import { gzipSync } from "node:zlib";
-
 import { encodeIdleConfig } from "../box/idleConfig.ts";
 
 export interface HostBootstrapConfig {
@@ -17,13 +15,23 @@ export interface HostBootstrapConfig {
     readonly clerkPublishableKey: string;
     readonly clerkCliOauthClientId: string;
   };
-  readonly idleBundle: string;
-  readonly machinesBundle: string;
+}
+
+export interface HostBootstrapAsset {
+  readonly objectName: string;
+  readonly sha256: string;
+  readonly destination: string;
+  readonly mode: "700" | "755";
+}
+
+export interface HostFetchWrapperConfig {
+  readonly bucketName: string;
+  readonly bootstrap: HostBootstrapAsset;
+  readonly idle: HostBootstrapAsset;
+  readonly machines: HostBootstrapAsset;
 }
 
 const b64 = (value: string): string => Buffer.from(value, "utf8").toString("base64");
-const gzipB64 = (value: string): string =>
-  gzipSync(Buffer.from(value, "utf8"), { level: 9 }).toString("base64");
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 export const HOST_AGENT_PACKAGES = [
@@ -439,8 +447,8 @@ phase_t3_idle_token() {
 
 phase_cloudbox_tools() {
   install -d -m 755 /opt/cloudbox /etc/cloudbox /var/lib/cloudbox
-  printf '%s' '${gzipB64(config.idleBundle)}' | base64 --decode | gzip --decompress > /opt/cloudbox/idle.mjs
-  printf '%s' '${gzipB64(config.machinesBundle)}' | base64 --decode | gzip --decompress > /opt/cloudbox/machines.mjs
+  test -s /opt/cloudbox/idle.mjs
+  test -s /opt/cloudbox/machines.mjs
   printf '%s' '${b64(idleConfig)}' | base64 --decode > /etc/cloudbox/config.json
   chmod 755 /opt/cloudbox/idle.mjs /opt/cloudbox/machines.mjs
   chmod 600 /etc/cloudbox/config.json
@@ -496,14 +504,41 @@ echo "cloudbox host bootstrap v2 completed"
 `;
 };
 
+const assetUrl = (bucketName: string, objectName: string): string =>
+  `https://storage.googleapis.com/download/storage/v1/b/${encodeURIComponent(bucketName)}/o/${encodeURIComponent(objectName)}?alt=media`;
+
 /**
- * Compute Engine limits an inline startup-script metadata value to 256 KiB.
- * The wrapper keeps the host bootstrap and its embedded bundles below that limit.
+ * Render the small Compute Engine metadata script. Large bootstrap assets live
+ * in GCS, are authenticated with the attached service account, and are verified
+ * before installation. The inner script still runs from a file with stdin
+ * detached so incus and curl installers cannot consume metadata-runner input.
  */
-export const renderHostStartupScript = (config: HostBootstrapConfig): string => {
-  const compressed = gzipSync(Buffer.from(renderHostBootstrap(config), "utf8"), { level: 9 });
-  // Write the script to a file and run it with stdin detached. Piping it into
-  // `bash` makes every child process share the script text as its stdin
-  // (incus parses that as instance YAML; curl|bash installers misbehave).
-  return `#!/usr/bin/env bash\nset -euo pipefail\ninstall -d -m 700 /var/lib/cloudbox\nprintf '%s' '${compressed.toString("base64")}' | base64 --decode | gzip --decompress > /var/lib/cloudbox/host-bootstrap.sh\nchmod 700 /var/lib/cloudbox/host-bootstrap.sh\nexec bash /var/lib/cloudbox/host-bootstrap.sh </dev/null\n`;
+export const renderFetchWrapper = (config: HostFetchWrapperConfig): string => {
+  const assets = [config.bootstrap, config.idle, config.machines]
+    .map((asset) =>
+      `fetch_asset ${shellQuote(assetUrl(config.bucketName, asset.objectName))} ${shellQuote(asset.sha256)} ${shellQuote(asset.destination)} ${shellQuote(asset.mode)}`,
+    )
+    .join("\n");
+  return `#!/usr/bin/env bash
+set -euo pipefail
+umask 027
+install -d -m 700 /var/lib/cloudbox
+install -d -m 755 /opt/cloudbox
+readonly METADATA=http://metadata.google.internal/computeMetadata/v1
+readonly TOKEN_RESPONSE="$(curl -fsS -H 'Metadata-Flavor: Google' "$METADATA/instance/service-accounts/default/token")"
+readonly ACCESS_TOKEN="$(printf '%s' "$TOKEN_RESPONSE" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')"
+test -n "$ACCESS_TOKEN"
+fetch_asset() {
+  local url="$1" expected="$2" destination="$3" mode="$4" temporary
+  temporary="$(mktemp /var/lib/cloudbox/asset.XXXXXX)"
+  trap 'rm -f "$temporary"' EXIT
+  curl -fsS --retry 36 --retry-delay 5 --retry-max-time 180 --retry-all-errors -H "Authorization: Bearer $ACCESS_TOKEN" "$url" -o "$temporary"
+  printf '%s  %s\\n' "$expected" "$temporary" | sha256sum --check --status
+  install -m "$mode" "$temporary" "$destination"
+  rm -f "$temporary"
+  trap - EXIT
+}
+${assets}
+exec bash ${shellQuote(config.bootstrap.destination)} </dev/null
+`;
 };

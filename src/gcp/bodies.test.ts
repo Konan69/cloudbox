@@ -92,7 +92,7 @@ describe("GCP request body builders", () => {
     });
   });
 
-  it("builds an Intel nested-virtualization instance with Ubuntu, data disk, SSH, and suspend scope", () => {
+  it("builds an Intel nested-virtualization instance with bootstrap asset access", () => {
     const body = buildInstanceInsertBody({
       project: "cloudbox-project",
       zone: "us-central1-a",
@@ -127,6 +127,7 @@ describe("GCP request body builders", () => {
     expect(body.scheduling.onHostMaintenance).toBe("MIGRATE");
     expect(body.serviceAccounts[0]?.scopes).toEqual([
       "https://www.googleapis.com/auth/compute",
+      "https://www.googleapis.com/auth/devstorage.read_only",
     ]);
     expect(body.labels).toEqual({ cloudbox: "dev" });
   });

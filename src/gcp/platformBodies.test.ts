@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
@@ -8,9 +9,28 @@ import {
   buildSecretBody,
   buildStorageBucketBody,
 } from "./platformBodies.ts";
+import { GcpProjectResponse } from "./platform.ts";
 import { makeWakeSourceArchive } from "./sourceArchive.ts";
 
 describe("GCP wake platform request bodies", () => {
+  it("decodes the canonical project number from Resource Manager", () => {
+    expect(
+      Schema.decodeUnknownSync(GcpProjectResponse)({
+        projectId: "gen-lang-client-0924079125",
+        projectNumber: "322475471180",
+      }),
+    ).toEqual({
+      projectId: "gen-lang-client-0924079125",
+      projectNumber: "322475471180",
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(GcpProjectResponse)({
+        projectId: "gen-lang-client-0924079125",
+        projectNumber: "",
+      }),
+    ).toThrow();
+  });
+
   it("builds owned GCS, Artifact Registry, and Secret Manager resources", () => {
     expect(buildStorageBucketBody("wake-source", "europe-west2", "dev")).toMatchObject({
       name: "wake-source",

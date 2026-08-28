@@ -77,7 +77,7 @@ roles/run.admin
 
 The deployer also needs `iam.serviceAccounts.actAs` on `cloudbox-wake` when Cloud Run attaches that service identity.
 
-For new projects, Cloud Build uses the Compute Engine default service account. The stack derives that identity from the Service Usage project number and grants it `roles/cloudbuild.builds.builder` on the project, `roles/storage.objectViewer` on the source bucket, and `roles/artifactregistry.writer` on the image repository. These bindings are dependencies of the build resource.
+For new projects, Cloud Build uses the Compute Engine default service account. The stack resolves the canonical project number with Resource Manager `projects.get`, then grants that identity `roles/cloudbuild.builds.builder` on the project, `roles/storage.objectViewer` on the source bucket, and `roles/artifactregistry.writer` on the image repository. These bindings are dependencies of the build resource.
 
 ## Instance IAM scope
 

@@ -47,6 +47,11 @@ export interface IamPolicyBinding {
   } | undefined;
 }
 
+export const GCP_INSTANCE_SCOPES = [
+  "https://www.googleapis.com/auth/compute",
+  "https://www.googleapis.com/auth/devstorage.read_only",
+] as const;
+
 export interface IamPolicy {
   readonly version?: number | undefined;
   readonly etag?: string | undefined;
@@ -148,7 +153,7 @@ export const buildInstanceInsertBody = (input: InstanceBodyInput) => ({
   serviceAccounts: [
     {
       email: "default",
-      scopes: ["https://www.googleapis.com/auth/compute"],
+      scopes: [...GCP_INSTANCE_SCOPES],
     },
   ],
   scheduling: {

@@ -6,7 +6,12 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { buildDiskInsertBody, buildFirewallRuleBody, buildInstanceInsertBody } from "./bodies.ts";
+import {
+  buildDiskInsertBody,
+  buildFirewallRuleBody,
+  buildInstanceInsertBody,
+  GCP_INSTANCE_SCOPES,
+} from "./bodies.ts";
 import { GcpApi, Operation } from "./client.ts";
 import type { Providers } from "./providers.ts";
 
@@ -50,6 +55,14 @@ const InstanceResponse = Schema.Struct({
         ),
       ),
     }),
+  ),
+  serviceAccounts: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        email: Schema.optional(Schema.String),
+        scopes: Schema.optional(Schema.Array(Schema.String)),
+      }),
+    ),
   ),
   disks: Schema.optional(
     Schema.Array(
@@ -136,6 +149,7 @@ export interface GcpInstanceProps {
   readonly startupScript: string;
   readonly sshPublicKey: string;
   readonly cloudboxName: string;
+  readonly assetDependencies: ReadonlyArray<string>;
 }
 
 export type GcpInstance = Resource<
@@ -422,6 +436,36 @@ export const GcpInstanceProvider = (api: GcpApi) =>
         );
       }
 
+      const currentScopes = current.serviceAccounts?.[0]?.scopes ?? [];
+      let restartAfterReconcile = false;
+      if (!GCP_INSTANCE_SCOPES.every((scope) => currentScopes.includes(scope))) {
+        const originalStatus = current.status;
+        if (originalStatus !== "TERMINATED") {
+          const stop = yield* api.request(
+            `stop ${news.name} to update access scopes`,
+            `${instancePath(api, news.zone, news.name)}/stop`,
+            Operation,
+            { method: "POST" },
+          );
+          yield* runZonal(api, stop, news.zone);
+        }
+        const setServiceAccount = yield* api.request(
+          `set service account scopes on ${news.name}`,
+          `${instancePath(api, news.zone, news.name)}/setServiceAccount`,
+          Operation,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              email: current.serviceAccounts?.[0]?.email ?? "default",
+              scopes: [...GCP_INSTANCE_SCOPES],
+            }),
+          },
+        );
+        yield* runZonal(api, setServiceAccount, news.zone);
+        restartAfterReconcile = originalStatus !== "TERMINATED";
+        current = (yield* getInstance(api, news.zone, news.name)) ?? current;
+      }
+
       const metadata = desiredMetadata(news);
       if (!same(current.metadata?.items ?? [], metadata)) {
         const operation = yield* api.request(
@@ -449,6 +493,15 @@ export const GcpInstanceProvider = (api: GcpApi) =>
           { method: "POST", body: JSON.stringify({ labelFingerprint: current.labelFingerprint, labels: { cloudbox: news.cloudboxName } }) },
         );
         yield* runZonal(api, operation, news.zone);
+      }
+      if (restartAfterReconcile) {
+        const start = yield* api.request(
+          `restart ${news.name} after updating access scopes`,
+          `${instancePath(api, news.zone, news.name)}/start`,
+          Operation,
+          { method: "POST" },
+        );
+        yield* runZonal(api, start, news.zone);
       }
       const fresh = yield* getInstance(api, news.zone, news.name);
       return instanceAttrs(fresh ?? current, news.dataDiskName);

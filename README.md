@@ -113,7 +113,7 @@ pnpm check:bootstrap
 pnpm cloudbox --help
 ```
 
-`dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. The GCP bootstrap embeds gzip-compressed copies, and its startup-script wrapper is checked against Compute Engine's 256 KiB metadata-value limit. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`; the Cloud Run source archive contains the self-contained `dist/wake-service.mjs` bundle.
+`dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. GCP uploads those bundles and the rendered inner bootstrap as content-addressed objects in a private assets bucket; instance metadata contains only a sub-4 KiB authenticated fetch-and-verify wrapper. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`; the Cloud Run source archive contains the self-contained `dist/wake-service.mjs` bundle.
 
 ## First run
 

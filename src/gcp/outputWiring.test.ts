@@ -42,6 +42,7 @@ describe("Alchemy GCP resource-output wiring", () => {
       startupScript: "script",
       sshPublicKey: "key",
       cloudboxName: "dev",
+      assetDependencies: [text, text],
     } satisfies PropsInput<GcpInstanceProps>;
     const instanceIam = {
       project: "project",

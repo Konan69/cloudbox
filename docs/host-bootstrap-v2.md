@@ -1,12 +1,12 @@
 # Host bootstrap v2
 
-`src/bootstrap/render-host.ts` renders the GCP N2 host bootstrap. The caller must provide every deployment value, both built Cloudbox bundles, and the stable GCP disk path:
+`src/bootstrap/render-host.ts` renders the GCP N2 host bootstrap. The caller provides every deployment value and the stable GCP disk path:
 
 ```text
 /dev/disk/by-id/google-<diskName>
 ```
 
-The renderer does not contact GCP. The generated script is intended for an Ubuntu 24.04 x86_64 VM with nested virtualization enabled and `/dev/kvm` present.
+The renderer does not contact GCP. Alchemy uploads the rendered inner script plus `dist/idle.mjs` and `dist/machines.mjs` to a private, content-addressed GCS assets bucket. Instance metadata contains only a small wrapper that gets a metadata-server token, downloads all three objects, verifies their SHA-256 hashes, installs them, and executes the inner script from a file with stdin detached. The generated script is intended for an Ubuntu 24.04 x86_64 VM with nested virtualization enabled and `/dev/kvm` present.
 
 ## Phases
 

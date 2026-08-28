@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
-import { renderHostStartupScript } from "./src/bootstrap/render-host.ts";
+import { renderFetchWrapper, renderHostBootstrap } from "./src/bootstrap/render-host.ts";
 import { renderUserData } from "./src/bootstrap/render.ts";
 import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
 import { loadConfig } from "./src/config.ts";
@@ -33,7 +33,8 @@ const expandHome = (path: string): string =>
 
 const gcpDataDiskName = (config: GcpCloudboxConfig): string => `cloudbox-${config.name}-data`;
 const gcpRegion = (zone: string): string => zone.replace(/-[a-z]$/u, "");
-const shortHash = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 10);
+const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
+const shortHash = (value: string): string => sha256(value).slice(0, 10);
 const gcpBucketName = (config: GcpCloudboxConfig, purpose: string): string =>
   `cloudbox-${config.name.slice(0, 32)}-${purpose}-${shortHash(`${config.gcp.project}:${config.name}:${purpose}`)}`;
 const gcpWakeServiceName = (config: GcpCloudboxConfig): string =>
@@ -61,43 +62,41 @@ const deploymentInputs = (config: CloudboxConfig) =>
           }),
       ),
     );
-    const startupScript =
-      config.provider === "aws"
-        ? renderUserData({
-            config,
-            sshPublicKey,
-            idleBundle: yield* readInput("dist/idle-aws.mjs", "pnpm build:idle:aws"),
-          })
-        : renderHostStartupScript({
-            boxUser: config.boxUser,
-            name: config.name,
-            project: config.gcp.project,
-            zone: config.gcp.zone,
-            zfsDataDevice: `/dev/disk/by-id/google-${gcpDataDiskName(config)}`,
-            idleMinutes: config.idleMinutes,
-            t3Port: 3773,
-            t3: {
-              repoUrl: config.t3.repoUrl,
-              branch: config.t3.branch,
-              relayUrl: "https://relay.t3.codes",
-              clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
-              clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
-            },
-            idleBundle: yield* readInput("dist/idle.mjs", "pnpm build:idle"),
-            machinesBundle: yield* readInput("dist/machines.mjs", "pnpm build:machines"),
-          });
-    const limit = config.provider === "aws" ? 16 * 1024 : 256 * 1024;
-    if (Buffer.byteLength(startupScript, "utf8") > limit) {
-      return yield* Effect.fail(
-        new DeploymentInputError({
-          message: `Rendered ${config.provider === "aws" ? "EC2 user data" : "GCE startup script"} exceeds the ${config.provider === "aws" ? "16 KiB" : "256 KiB"} launch limit`,
-        }),
-      );
+    if (config.provider === "aws") {
+      const startupScript = renderUserData({
+        config,
+        sshPublicKey,
+        idleBundle: yield* readInput("dist/idle-aws.mjs", "pnpm build:idle:aws"),
+      });
+      if (Buffer.byteLength(startupScript, "utf8") > 16 * 1024) {
+        return yield* Effect.fail(
+          new DeploymentInputError({
+            message: "Rendered EC2 user data exceeds the 16 KiB launch limit",
+          }),
+        );
+      }
+      return { sshPublicKey, startupScript };
     }
-    const wakeBundle = config.provider === "gcp"
-      ? yield* readInput("dist/wake-service.mjs", "pnpm build:wake")
-      : undefined;
-    return { sshPublicKey, startupScript, wakeBundle };
+    const idleBundle = yield* readInput("dist/idle.mjs", "pnpm build:idle");
+    const machinesBundle = yield* readInput("dist/machines.mjs", "pnpm build:machines");
+    const hostBootstrap = renderHostBootstrap({
+      boxUser: config.boxUser,
+      name: config.name,
+      project: config.gcp.project,
+      zone: config.gcp.zone,
+      zfsDataDevice: `/dev/disk/by-id/google-${gcpDataDiskName(config)}`,
+      idleMinutes: config.idleMinutes,
+      t3Port: 3773,
+      t3: {
+        repoUrl: config.t3.repoUrl,
+        branch: config.t3.branch,
+        relayUrl: "https://relay.t3.codes",
+        clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
+        clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
+      },
+    });
+    const wakeBundle = yield* readInput("dist/wake-service.mjs", "pnpm build:wake");
+    return { sshPublicKey, hostBootstrap, idleBundle, machinesBundle, wakeBundle };
   });
 
 const awsProviders = Layer.unwrap(
@@ -286,7 +285,9 @@ const deployAws = (config: AwsCloudboxConfig, sshPublicKey: string, userData: st
 const deployGcp = (
   config: GcpCloudboxConfig,
   sshPublicKey: string,
-  startupScript: string,
+  hostBootstrap: string,
+  idleBundle: string,
+  machinesBundle: string,
   wakeBundle: string,
 ) =>
   Effect.gen(function* () {
@@ -311,7 +312,10 @@ const deployGcp = (
       ),
     );
     const api = Object.fromEntries(apiNames.map((name, index) => [name, apis[index]!.serviceName]));
-    const projectNumber = apis[0]!.projectNumber;
+    const projectInfo = yield* GCP.GcpProjectInfo("CloudboxProjectInfo", {
+      project: config.gcp.project,
+    });
+    const projectNumber = projectInfo.projectNumber;
     yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
       project: config.gcp.project,
       name: `${instanceName}-ssh`,
@@ -327,6 +331,76 @@ const deployGcp = (
       type: config.gcp.dataDiskType,
       cloudboxName: config.name,
     });
+    const assetsBucketName = gcpBucketName(config, "assets");
+    const assetsBucket = yield* GCP.GcpStorageBucket("CloudboxHostAssetsBucket", {
+      project: config.gcp.project,
+      name: assetsBucketName,
+      location: region,
+      cloudboxName: config.name,
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const bootstrapSha256 = sha256(hostBootstrap);
+    const idleSha256 = sha256(idleBundle);
+    const machinesSha256 = sha256(machinesBundle);
+    const [bootstrapObject, idleObject, machinesObject] = yield* Effect.all([
+      GCP.GcpStorageObject("CloudboxHostBootstrapObject", {
+        bucketName: assetsBucket.bucketName,
+        objectName: bootstrapSha256,
+        contentBase64: Buffer.from(hostBootstrap, "utf8").toString("base64"),
+        contentType: "text/x-shellscript; charset=utf-8",
+        sha256: bootstrapSha256,
+        apiService: api["storage.googleapis.com"]!,
+      }),
+      GCP.GcpStorageObject("CloudboxIdleBundleObject", {
+        bucketName: assetsBucket.bucketName,
+        objectName: idleSha256,
+        contentBase64: Buffer.from(idleBundle, "utf8").toString("base64"),
+        contentType: "text/javascript; charset=utf-8",
+        sha256: idleSha256,
+        apiService: api["storage.googleapis.com"]!,
+      }),
+      GCP.GcpStorageObject("CloudboxMachinesBundleObject", {
+        bucketName: assetsBucket.bucketName,
+        objectName: machinesSha256,
+        contentBase64: Buffer.from(machinesBundle, "utf8").toString("base64"),
+        contentType: "text/javascript; charset=utf-8",
+        sha256: machinesSha256,
+        apiService: api["storage.googleapis.com"]!,
+      }),
+    ]);
+    const computeServiceAccountEmail = GCP.cloudBuildServiceAccountEmail(projectNumber);
+    const computeMember = GCP.iamServiceAccountMember(computeServiceAccountEmail);
+    const assetsBinding = yield* GCP.GcpResourceIamBinding("CloudboxHostAssetsIam", {
+      target: "bucket",
+      resourceName: assetsBucket.bucketName,
+      member: computeMember,
+      role: "roles/storage.objectViewer",
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const startupScript = renderFetchWrapper({
+      bucketName: assetsBucketName,
+      bootstrap: {
+        objectName: bootstrapSha256,
+        sha256: bootstrapSha256,
+        destination: "/var/lib/cloudbox/host-bootstrap.sh",
+        mode: "700",
+      },
+      idle: {
+        objectName: idleSha256,
+        sha256: idleSha256,
+        destination: "/opt/cloudbox/idle.mjs",
+        mode: "755",
+      },
+      machines: {
+        objectName: machinesSha256,
+        sha256: machinesSha256,
+        destination: "/opt/cloudbox/machines.mjs",
+        mode: "755",
+      },
+    });
+    if (Buffer.byteLength(startupScript, "utf8") >= 4 * 1024) {
+      return yield* Effect.die("Rendered GCE fetch wrapper is not smaller than 4 KiB");
+    }
     const instance = yield* GCP.GcpInstance("CloudboxInstance", {
       project: config.gcp.project,
       zone: config.gcp.zone,
@@ -338,6 +412,12 @@ const deployGcp = (
       startupScript,
       sshPublicKey: sshPublicKey.trim(),
       cloudboxName: config.name,
+      assetDependencies: [
+        bootstrapObject.objectName,
+        idleObject.objectName,
+        machinesObject.objectName,
+        assetsBinding.role,
+      ],
     });
     const wakeServiceAccount = yield* GCP.GcpServiceAccount("CloudboxWakeServiceAccount", {
       project: config.gcp.project,
@@ -388,8 +468,7 @@ const deployGcp = (
       apiService: api["artifactregistry.googleapis.com"]!,
     });
     const imageUri = `${region}-docker.pkg.dev/${config.gcp.project}/cloudbox-wake/service:${archive.sha256}`;
-    const buildServiceAccountEmail = GCP.cloudBuildServiceAccountEmail(projectNumber);
-    const buildMember = GCP.iamServiceAccountMember(buildServiceAccountEmail);
+    const buildMember = computeMember;
     const buildProjectBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeBuildProjectIam", {
       target: "project",
       resourceName: `projects/${config.gcp.project}`,
@@ -494,14 +573,20 @@ export default Alchemy.Stack(
   { providers: cloudProviders, state: Alchemy.localState() },
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
-    const { sshPublicKey, startupScript, wakeBundle } = yield* deploymentInputs(config).pipe(Effect.orDie);
+    const inputs = yield* deploymentInputs(config).pipe(Effect.orDie);
     return config.provider === "aws"
-      ? yield* deployAws(config, sshPublicKey, startupScript)
+      ? yield* deployAws(
+          config,
+          inputs.sshPublicKey,
+          inputs.startupScript ?? (yield* Effect.die("AWS startup script is missing")),
+        )
       : yield* deployGcp(
           config,
-          sshPublicKey,
-          startupScript,
-          wakeBundle ?? (yield* Effect.die("wake bundle is missing")),
+          inputs.sshPublicKey,
+          inputs.hostBootstrap ?? (yield* Effect.die("host bootstrap is missing")),
+          inputs.idleBundle ?? (yield* Effect.die("idle bundle is missing")),
+          inputs.machinesBundle ?? (yield* Effect.die("machines bundle is missing")),
+          inputs.wakeBundle ?? (yield* Effect.die("wake bundle is missing")),
         );
   }),
 );

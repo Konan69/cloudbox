@@ -1,13 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 import { IdleConfig } from "../box/idleConfig.ts";
 import {
   HOST_AGENT_PACKAGES,
+  renderFetchWrapper,
   renderHostBootstrap,
-  renderHostStartupScript,
 } from "./render-host.ts";
 
 const config = {
@@ -25,9 +25,10 @@ const config = {
     clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
     clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
   },
-  idleBundle: "console.log('idle bundle')",
-  machinesBundle: "console.log('machines bundle')",
 } as const;
+
+const sha256 = (value: string): string =>
+  createHash("sha256").update(value).digest("hex");
 
 describe("renderHostBootstrap", () => {
   it("renders the settled host phases and interpolates config", () => {
@@ -84,16 +85,50 @@ describe("renderHostBootstrap", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
-  it("compresses the built bundles below GCE's metadata value limit", () => {
-    const startupScript = renderHostStartupScript({
-      ...config,
-      idleBundle: readFileSync("dist/idle.mjs", "utf8"),
-      machinesBundle: readFileSync("dist/machines.mjs", "utf8"),
+  it("keeps bundles out of the inner bootstrap", () => {
+    const script = renderHostBootstrap(config);
+
+    expect(script).toContain("test -s /opt/cloudbox/idle.mjs");
+    expect(script).toContain("test -s /opt/cloudbox/machines.mjs");
+    expect(script).not.toContain("console.log('idle bundle')");
+  });
+});
+
+describe("renderFetchWrapper", () => {
+  it("renders a sub-4 KiB authenticated wrapper with content-addressed assets", () => {
+    const bootstrap = renderHostBootstrap(config);
+    const idle = "console.log('idle')\n";
+    const machines = "console.log('machines')\n";
+    const wrapper = renderFetchWrapper({
+      bucketName: "cloudbox-test-assets-deadbeef00",
+      bootstrap: {
+        objectName: sha256(bootstrap),
+        sha256: sha256(bootstrap),
+        destination: "/var/lib/cloudbox/host-bootstrap.sh",
+        mode: "700",
+      },
+      idle: {
+        objectName: sha256(idle),
+        sha256: sha256(idle),
+        destination: "/opt/cloudbox/idle.mjs",
+        mode: "755",
+      },
+      machines: {
+        objectName: sha256(machines),
+        sha256: sha256(machines),
+        destination: "/opt/cloudbox/machines.mjs",
+        mode: "755",
+      },
     });
 
-    expect(Buffer.byteLength(startupScript, "utf8")).toBeLessThanOrEqual(256 * 1024);
-    expect(startupScript).toContain("gzip --decompress");
-    const result = spawnSync("bash", ["-n"], { input: startupScript, encoding: "utf8" });
+    expect(Buffer.byteLength(wrapper, "utf8")).toBeLessThan(4 * 1024);
+    expect(wrapper).toContain("Metadata-Flavor: Google");
+    expect(wrapper).toContain(`/${sha256(bootstrap)}?alt=media`);
+    expect(wrapper).toContain(`/${sha256(idle)}?alt=media`);
+    expect(wrapper).toContain(`/${sha256(machines)}?alt=media`);
+    expect(wrapper).toContain(`printf '%s  %s\\n' "$expected" "$temporary" | sha256sum --check --status`);
+    expect(wrapper).toContain("exec bash '/var/lib/cloudbox/host-bootstrap.sh' </dev/null");
+    const result = spawnSync("bash", ["-n"], { input: wrapper, encoding: "utf8" });
     expect(result.status, result.stderr).toBe(0);
   });
 });
