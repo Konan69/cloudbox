@@ -249,7 +249,7 @@ const statusCommand = Command.make("status").pipe(
 
 const viaServiceFlag = Flag.boolean("via-service").pipe(
   Flag.withDefault(false),
-  Flag.withDescription("Wake through the deployed Cloudflare Worker instead of direct GCP credentials."),
+  Flag.withDescription("Wake through the deployed Cloud Run service instead of direct GCP credentials."),
 );
 
 const wakeCommand = Command.make("wake", { viaService: viaServiceFlag }).pipe(

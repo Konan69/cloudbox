@@ -38,7 +38,7 @@ describe("GCP request body builders", () => {
       accountId: "cloudbox-wake",
       serviceAccount: {
         displayName: "Cloudbox dev wake service",
-        description: "Least-privilege identity used by the Cloudbox dev wake Worker",
+        description: "Least-privilege identity used by the Cloudbox dev Cloud Run wake service",
       },
     });
     expect(buildCustomRoleBody({ cloudboxName: "dev" }).includedPermissions).toEqual([

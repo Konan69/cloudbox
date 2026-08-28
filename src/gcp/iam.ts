@@ -4,7 +4,6 @@ import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import {
@@ -36,13 +35,6 @@ const CustomRoleResponse = Schema.Struct({
   includedPermissions: Schema.optional(Schema.Array(Schema.String)),
   stage: Schema.optional(Schema.String),
   deleted: Schema.optional(Schema.Boolean),
-});
-
-const ServiceAccountKeyResponse = Schema.Struct({
-  name: Schema.NonEmptyString,
-  privateKeyData: Schema.optional(Schema.NonEmptyString),
-  validAfterTime: Schema.optional(Schema.String),
-  validBeforeTime: Schema.optional(Schema.String),
 });
 
 const IamCondition = Schema.Struct({
@@ -100,27 +92,6 @@ export type GcpCustomRole = Resource<
   Providers
 >;
 export const GcpCustomRole = Resource<GcpCustomRole>("GCP.IAM.CustomRole");
-
-export interface GcpServiceAccountKeyProps {
-  readonly project: string;
-  readonly serviceAccountEmail: string;
-  readonly rotation: number;
-}
-
-export type GcpServiceAccountKey = Resource<
-  "GCP.IAM.ServiceAccountKey",
-  GcpServiceAccountKeyProps,
-  {
-    readonly name: string;
-    readonly privateKeyJson: Redacted.Redacted<string>;
-    readonly rotation: number;
-  },
-  never,
-  Providers
->;
-export const GcpServiceAccountKey = Resource<GcpServiceAccountKey>(
-  "GCP.IAM.ServiceAccountKey",
-);
 
 export interface GcpIamBindingProps {
   readonly project: string;
@@ -358,84 +329,6 @@ export const GcpCustomRoleProvider = (api: GcpApi) =>
         `delete custom role ${output.roleId}`,
         `/${output.name.split("/").map(encodeURIComponent).join("/")}`,
         CustomRoleResponse,
-        { method: "DELETE", baseUrl: IAM_API },
-      ).pipe(
-        Effect.catchTag("GcpApiError", (error) =>
-          error.status === 404 ? Effect.void : Effect.fail(error),
-        ),
-      );
-    }),
-  });
-
-export const GcpServiceAccountKeyProvider = (api: GcpApi) =>
-  Provider.succeed(GcpServiceAccountKey, {
-    stables: ["name"],
-    diff: Effect.fn(function* ({ olds, news }) {
-      if (!isResolved(news)) return undefined;
-      if (olds === undefined) return { action: "update" } as const;
-      return olds.project === news.project &&
-        olds.serviceAccountEmail === news.serviceAccountEmail &&
-        olds.rotation === news.rotation
-        ? undefined
-        : { action: "replace", deleteFirst: false } as const;
-    }),
-    read: Effect.fn(function* ({ output }) {
-      if (output === undefined) return undefined;
-      const key = yield* api.requestOptional(
-        `get service account key ${output.name}`,
-        `/${output.name.split("/").map(encodeURIComponent).join("/")}`,
-        ServiceAccountKeyResponse,
-        { baseUrl: IAM_API },
-      );
-      return key === undefined ? undefined : output;
-    }),
-    reconcile: Effect.fn(function* ({ news, output }) {
-      if (output !== undefined) return output;
-      const key = yield* api.request(
-        `create key for ${news.serviceAccountEmail}`,
-        `${serviceAccountPath(news.project, news.serviceAccountEmail)}/keys`,
-        ServiceAccountKeyResponse,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            privateKeyType: "TYPE_GOOGLE_CREDENTIALS_FILE",
-            keyAlgorithm: "KEY_ALG_RSA_2048",
-          }),
-          baseUrl: IAM_API,
-        },
-      );
-      if (key.privateKeyData === undefined) {
-        return yield* Effect.fail(
-          new GcpIamResourceError({
-            resource: key.name,
-            message: "Google IAM created a service-account key without returning privateKeyData",
-          }),
-        );
-      }
-      let privateKeyJson: string;
-      try {
-        privateKeyJson = Buffer.from(key.privateKeyData, "base64").toString("utf8");
-        JSON.parse(privateKeyJson);
-      } catch (cause) {
-        return yield* Effect.fail(
-          new GcpIamResourceError({
-            resource: key.name,
-            message: "Google IAM returned invalid service-account key JSON",
-            cause,
-          }),
-        );
-      }
-      return {
-        name: key.name,
-        privateKeyJson: Redacted.make(privateKeyJson),
-        rotation: news.rotation,
-      };
-    }),
-    delete: Effect.fn(function* ({ output }) {
-      yield* api.request(
-        `delete service account key ${output.name}`,
-        `/${output.name.split("/").map(encodeURIComponent).join("/")}`,
-        EmptyResponse,
         { method: "DELETE", baseUrl: IAM_API },
       ).pipe(
         Effect.catchTag("GcpApiError", (error) =>

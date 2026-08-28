@@ -25,7 +25,7 @@ const handler = (gcp: WakeGcpClient, rateLimiter: WakeRateLimiter = availableLim
     now: () => 123_000,
   });
 
-describe("wake Worker request handling", () => {
+describe("wake service request handling with fake GCP and store", () => {
   it("rejects a missing bearer secret before calling GCP", async () => {
     const gcp = fakeGcp("RUNNING");
     const response = await handler(gcp)(request("wrong-secret"));

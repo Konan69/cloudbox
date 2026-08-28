@@ -77,7 +77,7 @@ export const buildServiceAccountBody = (input: ServiceAccountBodyInput) => ({
   accountId: input.accountId,
   serviceAccount: {
     displayName: `Cloudbox ${input.cloudboxName} wake service`,
-    description: `Least-privilege identity used by the Cloudbox ${input.cloudboxName} wake Worker`,
+    description: `Least-privilege identity used by the Cloudbox ${input.cloudboxName} Cloud Run wake service`,
   },
 });
 

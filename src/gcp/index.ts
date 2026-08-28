@@ -2,5 +2,8 @@ export * from "./auth.ts";
 export * from "./bodies.ts";
 export * from "./client.ts";
 export * from "./iam.ts";
+export * from "./platform.ts";
+export * from "./platformBodies.ts";
+export * from "./sourceArchive.ts";
 export * from "./providers.ts";
 export * from "./resources.ts";

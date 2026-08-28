@@ -38,6 +38,17 @@ export const Operation = Schema.Struct({
 export type Operation = typeof Operation.Type;
 export type OperationScope = { readonly zone: string } | "global";
 
+export const GoogleLongRunningOperation = Schema.Struct({
+  name: Schema.NonEmptyString,
+  done: Schema.optional(Schema.Boolean),
+  error: Schema.optional(
+    Schema.Struct({ code: Schema.optional(Schema.Number), message: Schema.optional(Schema.String) }),
+  ),
+  response: Schema.optional(Schema.Unknown),
+});
+
+export type GoogleLongRunningOperation = typeof GoogleLongRunningOperation.Type;
+
 export class GcpAuthError extends Data.TaggedError("GcpAuthError")<{
   readonly message: string;
   readonly cause: unknown;
@@ -103,7 +114,7 @@ export class GcpApi {
       options.tokenProvider ?? makeAccessTokenProvider(options.credentials as GcpCredentials);
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#pollIntervalMs = options.pollIntervalMs ?? 1_000;
-    this.#maxOperationPolls = options.maxOperationPolls ?? 180;
+    this.#maxOperationPolls = options.maxOperationPolls ?? 600;
   }
 
   projectPath(path: string): string {
@@ -213,6 +224,49 @@ export class GcpApi {
         error.status === 404 ? Effect.succeed(undefined) : Effect.fail(error),
       ),
     );
+  }
+
+  waitForGoogleOperation(
+    initial: GoogleLongRunningOperation,
+    baseUrl: string,
+  ): Effect.Effect<
+    GoogleLongRunningOperation,
+    GcpAuthError | GcpApiError | GcpDecodeError | GcpOperationError
+  > {
+    const self = this;
+    return Effect.gen(function* () {
+      let operation = initial;
+      for (let poll = 0; poll < self.#maxOperationPolls; poll += 1) {
+        if (operation.done === true) {
+          if (operation.error !== undefined) {
+            return yield* Effect.fail(
+              new GcpOperationError({
+                operation: operation.name,
+                message: operation.error.message ?? `operation failed with code ${String(operation.error.code ?? "unknown")}`,
+                errors: [],
+              }),
+            );
+          }
+          return operation;
+        }
+        operation = yield* self.request(
+          `wait for operation ${operation.name}`,
+          `/${operation.name.split("/").map(encodeURIComponent).join("/")}`,
+          GoogleLongRunningOperation,
+          { baseUrl },
+        );
+        if (operation.done !== true && self.#pollIntervalMs > 0) {
+          yield* Effect.sleep(Duration.millis(self.#pollIntervalMs));
+        }
+      }
+      return yield* Effect.fail(
+        new GcpOperationError({
+          operation: initial.name,
+          message: `Operation did not finish after ${String(self.#maxOperationPolls)} polls`,
+          errors: [],
+        }),
+      );
+    });
   }
 
   waitForOperation(

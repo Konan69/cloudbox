@@ -2,7 +2,6 @@
 import * as Alchemy from "alchemy";
 import * as AWS from "alchemy/AWS";
 import * as AWSRegion from "alchemy/AWS/Region";
-import * as Cloudflare from "alchemy/Cloudflare";
 import * as Output from "alchemy/Output";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
@@ -10,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import { createHash } from "node:crypto";
 import * as Schema from "effect/Schema";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
@@ -31,6 +31,12 @@ const expandHome = (path: string): string =>
     : NodePath.resolve(path);
 
 const gcpDataDiskName = (config: GcpCloudboxConfig): string => `cloudbox-${config.name}-data`;
+const gcpRegion = (zone: string): string => zone.replace(/-[a-z]$/u, "");
+const shortHash = (value: string): string => createHash("sha256").update(value).digest("hex").slice(0, 10);
+const gcpBucketName = (config: GcpCloudboxConfig, purpose: string): string =>
+  `cloudbox-${config.name.slice(0, 32)}-${purpose}-${shortHash(`${config.gcp.project}:${config.name}:${purpose}`)}`;
+const gcpWakeServiceName = (config: GcpCloudboxConfig): string =>
+  `cloudbox-${config.name.slice(0, 24)}-wake-${shortHash(`${config.gcp.project}:${config.name}:service`).slice(0, 8)}`;
 
 const deploymentInputs = (config: CloudboxConfig) =>
   Effect.gen(function* () {
@@ -87,7 +93,10 @@ const deploymentInputs = (config: CloudboxConfig) =>
         }),
       );
     }
-    return { sshPublicKey, startupScript };
+    const wakeBundle = config.provider === "gcp"
+      ? yield* readInput("dist/wake-service.mjs", "pnpm build:wake")
+      : undefined;
+    return { sshPublicKey, startupScript, wakeBundle };
   });
 
 const awsProviders = Layer.unwrap(
@@ -112,16 +121,7 @@ const gcpProviders = Layer.unwrap(
   ),
 );
 
-const cloudflareProviders = Layer.unwrap(
-  loadConfig("cloudbox.json").pipe(
-    Effect.map((config) =>
-      config.provider === "gcp" ? Cloudflare.providers() : Layer.empty,
-    ),
-    Effect.orDie,
-  ),
-);
-
-const cloudProviders = Layer.mergeAll(awsProviders, gcpProviders, cloudflareProviders);
+const cloudProviders = Layer.merge(awsProviders, gcpProviders);
 
 const makeInstanceTemplate = (config: AwsCloudboxConfig, userData: string) =>
   JSON.stringify({
@@ -280,11 +280,34 @@ const deployAws = (config: AwsCloudboxConfig, sshPublicKey: string, userData: st
     };
   });
 
-const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScript: string) =>
+const deployGcp = (
+  config: GcpCloudboxConfig,
+  sshPublicKey: string,
+  startupScript: string,
+  wakeBundle: string,
+) =>
   Effect.gen(function* () {
     const instanceName = `cloudbox-${config.name}`;
     const dataDiskName = gcpDataDiskName(config);
+    const wakeServiceName = gcpWakeServiceName(config);
     const networkTag = instanceName;
+    const region = gcpRegion(config.gcp.zone);
+    const apiNames = [
+      "run.googleapis.com",
+      "cloudbuild.googleapis.com",
+      "artifactregistry.googleapis.com",
+      "secretmanager.googleapis.com",
+      "storage.googleapis.com",
+    ] as const;
+    const apis = yield* Effect.all(
+      apiNames.map((service) =>
+        GCP.GcpProjectService(`CloudboxApi-${service.split(".")[0]}`, {
+          project: config.gcp.project,
+          service,
+        }),
+      ),
+    );
+    const api = Object.fromEntries(apiNames.map((name, index) => [name, apis[index]!.serviceName]));
     yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
       project: config.gcp.project,
       name: `${instanceName}-ssh`,
@@ -330,28 +353,99 @@ const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScrip
       serviceAccountEmail: wakeServiceAccount.email,
       roleName: wakeRole.name,
     });
-    const wakeKey = yield* GCP.GcpServiceAccountKey("CloudboxWakeServiceAccountKey", {
+    const archive = GCP.makeWakeSourceArchive(wakeBundle);
+    const sourceBucket = yield* GCP.GcpStorageBucket("CloudboxWakeSourceBucket", {
       project: config.gcp.project,
-      serviceAccountEmail: wakeServiceAccount.email,
-      rotation: config.gcp.wakeKeyRotation,
+      name: gcpBucketName(config, "source"),
+      location: region,
+      cloudboxName: config.name,
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const sourceObject = yield* GCP.GcpStorageObject("CloudboxWakeSourceObject", {
+      bucketName: sourceBucket.bucketName,
+      objectName: `wake-${archive.sha256}.tar.gz`,
+      contentBase64: archive.bytes.toString("base64"),
+      contentType: "application/gzip",
+      sha256: archive.sha256,
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const rateBucket = yield* GCP.GcpStorageBucket("CloudboxWakeRateBucket", {
+      project: config.gcp.project,
+      name: gcpBucketName(config, "rate"),
+      location: region,
+      cloudboxName: config.name,
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const repository = yield* GCP.GcpArtifactRepository("CloudboxWakeRepository", {
+      project: config.gcp.project,
+      location: region,
+      repositoryId: "cloudbox-wake",
+      cloudboxName: config.name,
+      apiService: api["artifactregistry.googleapis.com"]!,
+    });
+    const imageUri = `${region}-docker.pkg.dev/${config.gcp.project}/cloudbox-wake/service:${archive.sha256}`;
+    const build = yield* GCP.GcpCloudBuild("CloudboxWakeBuild", {
+      project: config.gcp.project,
+      location: region,
+      bucketName: sourceObject.bucketName,
+      objectName: sourceObject.objectName,
+      imageUri,
+      sourceSha256: archive.sha256,
+      apiServices: [
+        api["cloudbuild.googleapis.com"]!,
+        api["artifactregistry.googleapis.com"]!,
+        repository.name,
+      ],
     });
     const wakeSecret = yield* Alchemy.makeRandom("CloudboxWakeBearerSecret", { bytes: 32 });
-    const wakeRateLimit = yield* Cloudflare.KV.Namespace("CloudboxWakeRateLimit", {
-      title: `cloudbox-${config.name}-wake-rate-limit`,
+    const secret = yield* GCP.GcpSecret("CloudboxWakeSecret", {
+      project: config.gcp.project,
+      secretId: wakeServiceName,
+      cloudboxName: config.name,
+      apiService: api["secretmanager.googleapis.com"]!,
     });
-    const wakeWorker = yield* Cloudflare.Worker("CloudboxWakeWorker", {
-      main: "./src/wake/worker.ts",
-      compatibility: { date: "2026-08-28" },
-      env: {
-        GCP_PROJECT: config.gcp.project,
-        GCP_ZONE: config.gcp.zone,
-        GCE_INSTANCE: instance.instanceName,
-        CLOUDBOX_NAME: config.name,
-        GCP_SERVICE_ACCOUNT_KEY: wakeKey.privateKeyJson,
-        WAKE_SECRET: wakeSecret,
-        WAKE_RATE_LIMIT: wakeRateLimit,
-        GCP_ROLE_NAME: wakeBinding.roleName,
-      },
+    const secretVersion = yield* GCP.GcpSecretVersion("CloudboxWakeSecretVersion", {
+      secretName: secret.name,
+      value: wakeSecret,
+      apiService: api["secretmanager.googleapis.com"]!,
+    });
+    const wakeMember = `serviceAccount:${wakeServiceAccount.email}`;
+    const rateBucketBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeRateBucketIam", {
+      target: "bucket",
+      resourceName: rateBucket.bucketName,
+      member: wakeMember,
+      role: "roles/storage.objectAdmin",
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const secretBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeSecretIam", {
+      target: "secret",
+      resourceName: secret.name,
+      member: wakeMember,
+      role: "roles/secretmanager.secretAccessor",
+      apiService: api["secretmanager.googleapis.com"]!,
+    });
+    const wakeService = yield* GCP.GcpCloudRunService("CloudboxWakeService", {
+      project: config.gcp.project,
+      location: region,
+      serviceName: wakeServiceName,
+      cloudboxName: config.name,
+      serviceAccountEmail: wakeServiceAccount.email,
+      imageUri,
+      zone: config.gcp.zone,
+      instanceName: instance.instanceName,
+      rateLimitBucket: rateBucket.bucketName,
+      secretName: secret.name,
+      secretVersion: secretVersion.version,
+      buildId: build.buildId,
+      runtimeBindings: [wakeBinding.roleName, rateBucketBinding.role, secretBinding.role],
+      apiService: api["run.googleapis.com"]!,
+    });
+    yield* GCP.GcpResourceIamBinding("CloudboxWakePublicInvoker", {
+      target: "cloudRun",
+      resourceName: wakeService.name,
+      member: "allUsers",
+      role: "roles/run.invoker",
+      apiService: api["run.googleapis.com"]!,
     });
     return {
       instanceName: instance.instanceName,
@@ -359,8 +453,7 @@ const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScrip
       externalIp: instance.externalIp,
       dataDiskName: disk.dataDiskName,
       wakeServiceAccount: wakeServiceAccount.email,
-      wakeServiceAccountKey: wakeKey.name,
-      wakeUrl: wakeWorker.url,
+      wakeUrl: wakeService.uri,
       wakeSecret: wakeSecret.pipe(Output.map(Redacted.value)),
       wakeClientUrlEnv: "CLOUDBOX_WAKE_URL",
       wakeClientSecretEnv: "CLOUDBOX_WAKE_SECRET",
@@ -372,9 +465,14 @@ export default Alchemy.Stack(
   { providers: cloudProviders, state: Alchemy.localState() },
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
-    const { sshPublicKey, startupScript } = yield* deploymentInputs(config).pipe(Effect.orDie);
+    const { sshPublicKey, startupScript, wakeBundle } = yield* deploymentInputs(config).pipe(Effect.orDie);
     return config.provider === "aws"
       ? yield* deployAws(config, sshPublicKey, startupScript)
-      : yield* deployGcp(config, sshPublicKey, startupScript);
+      : yield* deployGcp(
+          config,
+          sshPublicKey,
+          startupScript,
+          wakeBundle ?? (yield* Effect.die("wake bundle is missing")),
+        );
   }),
 );
