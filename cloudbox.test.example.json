@@ -1,12 +1,12 @@
 {
   "provider": "gcp",
-  "name": "test",
+  "name": "dev-acceptance",
   "gcp": {
     "project": "your-gcp-project-id",
     "zone": "europe-west2-a",
-    "machineType": "n2-standard-2",
+    "machineType": "n2-standard-8",
     "bootDiskGb": 30,
-    "dataDiskGb": 50,
+    "dataDiskGb": 100,
     "dataDiskType": "pd-balanced",
     "credentials": "adc"
   },

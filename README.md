@@ -102,6 +102,7 @@ The public fork is cloned directly from `https://github.com/example/t3code.git`;
 pnpm build
 pnpm typecheck
 pnpm test
+pnpm check:bootstrap
 pnpm cloudbox --help
 ```
 
@@ -162,6 +163,9 @@ pnpm cloudbox sleep
 pnpm cloudbox sync --dry-run
 pnpm cloudbox sync
 pnpm cloudbox ssh
+pnpm cloudbox verify --host <ip> [--expect-vm] [--json]
+pnpm cloudbox verify-sleep [--timeout 1800] [--json]
+pnpm cloudbox verify-idle [--timeout 1800] [--json]
 ```
 
 | Command | Behavior |
@@ -171,6 +175,11 @@ pnpm cloudbox ssh
 | `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
 | `sync` | Runs `rsync -az --mkpath` for each configured identity path and applies every exclude. |
 | `ssh` | Opens `ssh dev@<current-public-ip>`. |
+| `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
+| `verify-sleep` | Sleeps and wakes through the configured provider, then proves uptime and a marker PID survived. |
+| `verify-idle` | Leaves the host untouched for `idleMinutes + 5` and verifies provider sleep. |
+
+Verification prints a table by default or JSON with `--json`, and exits non-zero if any check fails. `--timeout` is seconds. See [docs/testing.md](docs/testing.md) and [scripts/cloud-test.md](scripts/cloud-test.md).
 
 The public IP may change after hibernation because v1 does not allocate an Elastic IP. Every command discovers the current address.
 

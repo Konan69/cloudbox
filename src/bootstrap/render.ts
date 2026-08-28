@@ -51,7 +51,12 @@ set -euo pipefail
 umask 027
 mkdir -p /var/log
 exec > >(tee -a /var/log/cloudbox-bootstrap.log) 2>&1
-trap 'status=$?; echo "cloudbox bootstrap failed at line $LINENO (exit $status)"; exit $status' ERR
+on_error() {
+  local status=$?
+  echo "cloudbox bootstrap failed at line $LINENO (exit $status)"
+  exit "$status"
+}
+trap on_error ERR
 
 readonly MARKER=/var/lib/cloudbox/bootstrapped
 if [[ -f "$MARKER" ]]; then
@@ -143,7 +148,8 @@ WantedBy=default.target
 UNIT
 chown ${config.boxUser}:${config.boxUser} /home/${config.boxUser}/.config/systemd/user/t3code-fork.service
 loginctl enable-linger ${config.boxUser}
-readonly BOX_UID="$(id -u ${config.boxUser})"
+BOX_UID="$(id -u ${config.boxUser})"
+readonly BOX_UID
 systemctl start "user@\${BOX_UID}.service"
 runuser -u ${config.boxUser} -- env XDG_RUNTIME_DIR="/run/user/\${BOX_UID}" systemctl --user daemon-reload
 runuser -u ${config.boxUser} -- env XDG_RUNTIME_DIR="/run/user/\${BOX_UID}" systemctl --user enable --now t3code-fork.service
