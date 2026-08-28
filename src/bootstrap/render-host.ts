@@ -150,10 +150,14 @@ UNIT
   corepack enable
   corepack prepare pnpm@11.10.0 --activate
 
-  if [[ ! -x "/home/$BOX_USER/.vite-plus/bin/vp" ]]; then
+  # vite-plus installs to ~/.local/share/vite-plus/bin (older builds used ~/.vite-plus);
+  # resolve it through the user's login PATH instead of assuming a location.
+  if ! sudo -iu "$BOX_USER" bash -lc 'command -v vp' >/dev/null 2>&1; then
     sudo -iu "$BOX_USER" bash -lc 'curl -fsSL https://vite.plus | bash'
   fi
-  ln -sfn "/home/$BOX_USER/.vite-plus/bin/vp" /usr/local/bin/vp
+  vp_bin="$(sudo -iu "$BOX_USER" bash -lc 'command -v vp')"
+  test -x "$vp_bin"
+  ln -sfn "$vp_bin" /usr/local/bin/vp
   sudo -iu "$BOX_USER" bash -lc 'vp --version'
   test -c /dev/kvm
 }
@@ -305,7 +309,9 @@ corepack prepare pnpm@11.10.0 --activate
 npm install --global ${HOST_AGENT_PACKAGES.join(" ")}
 
 sudo -iu "$USER_NAME" bash -lc 'curl -fsSL https://vite.plus | bash'
-ln -sfn "/home/$USER_NAME/.vite-plus/bin/vp" /usr/local/bin/vp
+vp_bin="$(sudo -iu "$USER_NAME" bash -lc 'command -v vp')"
+test -x "$vp_bin"
+ln -sfn "$vp_bin" /usr/local/bin/vp
 
 # lane publishes Linux x86_64 releases through its official installer.
 # If that release channel is unavailable, build the public Git repository with Cargo.
@@ -337,9 +343,11 @@ phase_t3() {
     sudo -u "$BOX_USER" git -C "/home/$BOX_USER/t3code" reset --hard FETCH_HEAD
   fi
 
-  sudo -iu "$BOX_USER" bash -lc '
+  # The build runs in a login shell; propagate its failure explicitly so a
+  # broken build can never leave this phase marked complete.
+  if ! sudo -iu "$BOX_USER" bash -lc '
     set -euo pipefail
-    export PATH="$HOME/.vite-plus/bin:/usr/local/bin:/usr/bin:/bin"
+    export PATH="/usr/local/bin:/usr/bin:/bin"
     cd "$HOME/t3code"
     set -a
     . ./.env.example
@@ -351,7 +359,10 @@ phase_t3() {
     test -f apps/server/dist/client/index.html
     test -d apps/server/node_modules
     test -d node_modules/.pnpm
-  '
+  '; then
+    echo "T3 fork build failed" >&2
+    exit 1
+  fi
 
   install -d -m 700 -o "$BOX_USER" -g "$BOX_USER" "/home/$BOX_USER/.config/systemd/user"
   cat > "/home/$BOX_USER/.config/systemd/user/t3code-fork.service" <<'UNIT'
@@ -369,7 +380,7 @@ Environment=T3CODE_HOME=/home/${config.boxUser}/.t3
 Environment=T3CODE_RELAY_URL=${config.t3.relayUrl}
 Environment=T3CODE_CLERK_PUBLISHABLE_KEY=${config.t3.clerkPublishableKey}
 Environment=T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=${config.t3.clerkCliOauthClientId}
-Environment=PATH=/home/${config.boxUser}/.vite-plus/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/node /home/${config.boxUser}/t3code/apps/server/dist/bin.mjs serve --base-dir /home/${config.boxUser}/.t3 --host 127.0.0.1 --port ${String(config.t3Port)} /home/${config.boxUser}
 KillMode=mixed
 OOMPolicy=continue
