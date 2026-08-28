@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.alchemy/
+.alchemy-state/
+.env
+.env.*
+!.env.example
+cloudbox.json
+generated/
+*.user-data.sh
+.pi/

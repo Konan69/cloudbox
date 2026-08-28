@@ -1,0 +1,6 @@
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: false
+  workerd: false
+minimumReleaseAgeExclude:
+  - '@aws-sdk/client-ec2@3.1120.0'
