@@ -28,6 +28,31 @@ export interface InstanceBodyInput {
   readonly cloudboxName: string;
 }
 
+export interface ServiceAccountBodyInput {
+  readonly accountId: string;
+  readonly cloudboxName: string;
+}
+
+export interface CustomRoleBodyInput {
+  readonly cloudboxName: string;
+}
+
+export interface IamPolicyBinding {
+  readonly role: string;
+  readonly members: ReadonlyArray<string>;
+  readonly condition?: {
+    readonly title: string;
+    readonly description?: string | undefined;
+    readonly expression: string;
+  } | undefined;
+}
+
+export interface IamPolicy {
+  readonly version?: number | undefined;
+  readonly etag?: string | undefined;
+  readonly bindings?: ReadonlyArray<IamPolicyBinding> | undefined;
+}
+
 export const buildFirewallRuleBody = (input: FirewallRuleBodyInput) => ({
   name: input.name,
   description: `SSH access for cloudbox ${input.cloudboxName}`,
@@ -47,6 +72,41 @@ export const buildDiskInsertBody = (input: DiskBodyInput) => ({
   physicalBlockSizeBytes: "4096",
   labels: { cloudbox: input.cloudboxName },
 });
+
+export const buildServiceAccountBody = (input: ServiceAccountBodyInput) => ({
+  accountId: input.accountId,
+  serviceAccount: {
+    displayName: `Cloudbox ${input.cloudboxName} wake service`,
+    description: `Least-privilege identity used by the Cloudbox ${input.cloudboxName} wake Worker`,
+  },
+});
+
+export const buildCustomRoleBody = (input: CustomRoleBodyInput) => ({
+  title: `Cloudbox ${input.cloudboxName} wake`,
+  description: `Get, resume, or start only the Cloudbox ${input.cloudboxName} instance selected by its instance IAM policy`,
+  includedPermissions: [
+    "compute.instances.get",
+    "compute.instances.resume",
+    "compute.instances.start",
+  ],
+  stage: "GA",
+});
+
+export const buildIamPolicyWithBinding = (
+  policy: IamPolicy,
+  binding: IamPolicyBinding,
+): IamPolicy => {
+  const bindings = (policy.bindings ?? []).filter(
+    (current) =>
+      current.role !== binding.role ||
+      JSON.stringify(current.condition) !== JSON.stringify(binding.condition),
+  );
+  return {
+    version: Math.max(policy.version ?? 1, binding.condition === undefined ? 1 : 3),
+    ...(policy.etag === undefined ? {} : { etag: policy.etag }),
+    bindings: [...bindings, binding],
+  };
+};
 
 export const buildInstanceInsertBody = (input: InstanceBodyInput) => ({
   name: input.name,

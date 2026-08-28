@@ -8,6 +8,7 @@
     "bootDiskGb": 30,
     "dataDiskGb": 100,
     "dataDiskType": "pd-balanced",
+    "wakeKeyRotation": 1,
     "credentials": "adc"
   },
   "sshCidr": "203.0.113.10/32",

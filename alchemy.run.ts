@@ -2,11 +2,13 @@
 import * as Alchemy from "alchemy";
 import * as AWS from "alchemy/AWS";
 import * as AWSRegion from "alchemy/AWS/Region";
+import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
@@ -109,7 +111,16 @@ const gcpProviders = Layer.unwrap(
   ),
 );
 
-const cloudProviders = Layer.merge(awsProviders, gcpProviders);
+const cloudflareProviders = Layer.unwrap(
+  loadConfig("cloudbox.json").pipe(
+    Effect.map((config) =>
+      config.provider === "gcp" ? Cloudflare.providers() : Layer.empty,
+    ),
+    Effect.orDie,
+  ),
+);
+
+const cloudProviders = Layer.mergeAll(awsProviders, gcpProviders, cloudflareProviders);
 
 const makeInstanceTemplate = (config: AwsCloudboxConfig, userData: string) =>
   JSON.stringify({
@@ -300,11 +311,58 @@ const deployGcp = (config: GcpCloudboxConfig, sshPublicKey: string, startupScrip
       sshPublicKey: sshPublicKey.trim(),
       cloudboxName: config.name,
     });
+    const wakeServiceAccount = yield* GCP.GcpServiceAccount("CloudboxWakeServiceAccount", {
+      project: config.gcp.project,
+      accountId: "cloudbox-wake",
+      cloudboxName: config.name,
+    });
+    const wakeRole = yield* GCP.GcpCustomRole("CloudboxWakeRole", {
+      project: config.gcp.project,
+      roleId: "cloudboxWake",
+      cloudboxName: config.name,
+    });
+    const wakeBinding = yield* GCP.GcpIamBinding("CloudboxWakeIamBinding", {
+      project: config.gcp.project,
+      zone: config.gcp.zone,
+      instanceName: instance.instanceName,
+      cloudboxName: config.name,
+      serviceAccountEmail: wakeServiceAccount.email,
+      roleName: wakeRole.name,
+    });
+    const wakeKey = yield* GCP.GcpServiceAccountKey("CloudboxWakeServiceAccountKey", {
+      project: config.gcp.project,
+      serviceAccountEmail: wakeServiceAccount.email,
+      rotation: config.gcp.wakeKeyRotation,
+    });
+    const wakeSecret = yield* Alchemy.makeRandom("CloudboxWakeBearerSecret", { bytes: 32 });
+    const wakeRateLimit = yield* Cloudflare.KV.Namespace("CloudboxWakeRateLimit", {
+      title: `cloudbox-${config.name}-wake-rate-limit`,
+    });
+    const wakeWorker = yield* Cloudflare.Worker("CloudboxWakeWorker", {
+      main: "./src/wake/worker.ts",
+      compatibility: { date: "2026-08-28" },
+      env: {
+        GCP_PROJECT: config.gcp.project,
+        GCP_ZONE: config.gcp.zone,
+        GCE_INSTANCE: instance.instanceName,
+        CLOUDBOX_NAME: config.name,
+        GCP_SERVICE_ACCOUNT_KEY: wakeKey.privateKeyJson,
+        WAKE_SECRET: wakeSecret,
+        WAKE_RATE_LIMIT: wakeRateLimit,
+        GCP_ROLE_NAME: wakeBinding.roleName,
+      },
+    });
     return {
       instanceName: instance.instanceName,
       zone: instance.zone,
       externalIp: instance.externalIp,
       dataDiskName: disk.dataDiskName,
+      wakeServiceAccount: wakeServiceAccount.email,
+      wakeServiceAccountKey: wakeKey.name,
+      wakeUrl: wakeWorker.url,
+      wakeSecret: Redacted.value(yield* yield* wakeSecret),
+      wakeClientUrlEnv: "CLOUDBOX_WAKE_URL",
+      wakeClientSecretEnv: "CLOUDBOX_WAKE_SECRET",
     };
   });
 

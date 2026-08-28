@@ -73,6 +73,10 @@ export interface GcpApiOptions {
   readonly maxOperationPolls?: number;
 }
 
+export interface GcpRequestOptions extends RequestInit {
+  readonly baseUrl?: string;
+}
+
 const parseJson = (text: string): unknown => (text.length === 0 ? undefined : JSON.parse(text));
 
 const decodeApiError = (value: unknown): ApiErrorEnvelope | undefined => {
@@ -110,7 +114,7 @@ export class GcpApi {
     operation: string,
     path: string,
     schema: S,
-    init: RequestInit = {},
+    init: GcpRequestOptions = {},
   ): Effect.Effect<
     S["Type"],
     GcpAuthError | GcpApiError | GcpDecodeError,
@@ -123,15 +127,16 @@ export class GcpApi {
         catch: (cause) =>
           new GcpAuthError({ message: `Authentication failed for ${operation}`, cause }),
       });
+      const { baseUrl = COMPUTE_API, ...requestInit } = init;
       const response = yield* Effect.tryPromise({
         try: () =>
-          self.#fetch(`${COMPUTE_API}${path}`, {
-            ...init,
+          self.#fetch(`${baseUrl}${path}`, {
+            ...requestInit,
             headers: {
               Accept: "application/json",
               Authorization: `Bearer ${token}`,
-              ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
-              ...init.headers,
+              ...(requestInit.body === undefined ? {} : { "Content-Type": "application/json" }),
+              ...requestInit.headers,
             },
           }),
         catch: (cause) =>
@@ -197,12 +202,13 @@ export class GcpApi {
     operation: string,
     path: string,
     schema: S,
+    init: GcpRequestOptions = {},
   ): Effect.Effect<
     S["Type"] | undefined,
     GcpAuthError | GcpApiError | GcpDecodeError,
     S["DecodingServices"]
   > {
-    return this.request(operation, path, schema).pipe(
+    return this.request(operation, path, schema, init).pipe(
       Effect.catchTag("GcpApiError", (error) =>
         error.status === 404 ? Effect.succeed(undefined) : Effect.fail(error),
       ),

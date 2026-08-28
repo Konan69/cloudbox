@@ -68,6 +68,7 @@ export const GcpConfig = Schema.Struct({
   bootDiskGb: PositiveInteger,
   dataDiskGb: PositiveInteger,
   dataDiskType: Schema.Literals(["pd-ssd", "pd-balanced"]),
+  wakeKeyRotation: PositiveInteger,
   credentials: GcpCredentials,
 });
 

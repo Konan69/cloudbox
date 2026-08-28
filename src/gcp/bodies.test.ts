@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCustomRoleBody,
   buildDiskInsertBody,
   buildFirewallRuleBody,
+  buildIamPolicyWithBinding,
   buildInstanceInsertBody,
+  buildServiceAccountBody,
 } from "./bodies.ts";
 
 describe("GCP request body builders", () => {
@@ -25,6 +28,49 @@ describe("GCP request body builders", () => {
       allowed: [{ IPProtocol: "tcp", ports: ["22"] }],
       sourceRanges: ["203.0.113.10/32"],
       targetTags: ["cloudbox-dev"],
+    });
+  });
+
+  it("builds the dedicated wake service account and minimal custom role", () => {
+    expect(
+      buildServiceAccountBody({ accountId: "cloudbox-wake", cloudboxName: "dev" }),
+    ).toEqual({
+      accountId: "cloudbox-wake",
+      serviceAccount: {
+        displayName: "Cloudbox dev wake service",
+        description: "Least-privilege identity used by the Cloudbox dev wake Worker",
+      },
+    });
+    expect(buildCustomRoleBody({ cloudboxName: "dev" }).includedPermissions).toEqual([
+      "compute.instances.get",
+      "compute.instances.resume",
+      "compute.instances.start",
+    ]);
+  });
+
+  it("adds the wake principal without replacing unrelated instance IAM bindings", () => {
+    expect(
+      buildIamPolicyWithBinding(
+        {
+          version: 1,
+          etag: "etag-1",
+          bindings: [{ role: "roles/compute.viewer", members: ["user:owner@example.com"] }],
+        },
+        {
+          role: "projects/cloudbox-project/roles/cloudboxWake",
+          members: ["serviceAccount:cloudbox-wake@cloudbox-project.iam.gserviceaccount.com"],
+        },
+      ),
+    ).toEqual({
+      version: 1,
+      etag: "etag-1",
+      bindings: [
+        { role: "roles/compute.viewer", members: ["user:owner@example.com"] },
+        {
+          role: "projects/cloudbox-project/roles/cloudboxWake",
+          members: ["serviceAccount:cloudbox-wake@cloudbox-project.iam.gserviceaccount.com"],
+        },
+      ],
     });
   });
 

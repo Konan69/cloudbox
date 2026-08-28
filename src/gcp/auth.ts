@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 
 import type { GcpCredentials } from "../config.ts";
 
-const COMPUTE_SCOPE = "https://www.googleapis.com/auth/compute";
+const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 
 const expandHome = (path: string): string =>
   path === "~" || path.startsWith("~/")
@@ -17,7 +17,7 @@ export const makeAccessTokenProvider = (
   credentials: GcpCredentials,
 ): AccessTokenProvider => {
   const auth = new GoogleAuth({
-    scopes: [COMPUTE_SCOPE],
+    scopes: [CLOUD_PLATFORM_SCOPE],
     ...(credentials === "adc"
       ? {}
       : { keyFile: expandHome(credentials.serviceAccountJsonPath) }),
