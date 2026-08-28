@@ -3,6 +3,7 @@ import { isResolved } from "alchemy/Diff";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
 import * as Data from "effect/Data";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -26,6 +27,7 @@ const ARTIFACT_API = "https://artifactregistry.googleapis.com/v1";
 const CLOUD_BUILD_API = "https://cloudbuild.googleapis.com/v1";
 const SECRET_MANAGER_API = "https://secretmanager.googleapis.com/v1";
 const CLOUD_RUN_API = "https://run.googleapis.com/v2";
+const CLOUD_RESOURCE_MANAGER_API = "https://cloudresourcemanager.googleapis.com/v1";
 
 const EmptyResponse = Schema.Unknown;
 const Labels = Schema.Record(Schema.String, Schema.String);
@@ -98,7 +100,7 @@ export interface GcpProjectServiceProps {
 export type GcpProjectService = Resource<
   "GCP.ServiceUsage.ProjectService",
   GcpProjectServiceProps,
-  { readonly serviceName: string },
+  { readonly serviceName: string; readonly projectNumber: string },
   never,
   Providers
 >;
@@ -160,7 +162,7 @@ export interface GcpCloudBuildProps {
   readonly objectName: string;
   readonly imageUri: string;
   readonly sourceSha256: string;
-  readonly apiServices: ReadonlyArray<string>;
+  readonly dependencies: ReadonlyArray<string>;
 }
 export type GcpCloudBuild = Resource<
   "GCP.CloudBuild.Build",
@@ -215,7 +217,7 @@ export type GcpCloudRunService = Resource<
 >;
 export const GcpCloudRunService = Resource<GcpCloudRunService>("GCP.CloudRun.Service");
 
-export type GcpIamTarget = "bucket" | "secret" | "cloudRun";
+export type GcpIamTarget = "project" | "bucket" | "artifactRepository" | "secret" | "cloudRun";
 export interface GcpResourceIamBindingProps {
   readonly target: GcpIamTarget;
   readonly resourceName: string;
@@ -232,9 +234,12 @@ export type GcpResourceIamBinding = Resource<
 >;
 export const GcpResourceIamBinding = Resource<GcpResourceIamBinding>("GCP.IAM.ResourceBinding");
 
+const serviceProjectNumber = (serviceName: string): string =>
+  serviceName.split("/")[1] ?? serviceName;
+
 export const GcpProjectServiceProvider = (api: GcpApi) =>
   Provider.succeed(GcpProjectService, {
-    stables: ["serviceName"],
+    stables: ["serviceName", "projectNumber"],
     diff: Effect.fn(function* ({ olds, news }) {
       if (!isResolved(news)) return undefined;
       if (olds === undefined) return { action: "update" } as const;
@@ -244,16 +249,33 @@ export const GcpProjectServiceProvider = (api: GcpApi) =>
       if (olds === undefined) return undefined;
       const name = output?.serviceName ?? `projects/${olds.project}/services/${olds.service}`;
       const service = yield* api.requestOptional(`get API ${olds.service}`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
-      return service?.state === "ENABLED" ? { serviceName: service.name } : undefined;
+      return service?.state === "ENABLED"
+        ? { serviceName: service.name, projectNumber: serviceProjectNumber(service.name) }
+        : undefined;
     }),
     reconcile: Effect.fn(function* ({ news }) {
       const name = `projects/${news.project}/services/${news.service}`;
-      const current = yield* api.requestOptional(`get API ${news.service}`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
+      let current = yield* api.requestOptional(`get API ${news.service}`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
       if (current?.state !== "ENABLED") {
         const operation = yield* api.request(`enable API ${news.service}`, `${resourcePath(name)}:enable`, GoogleLongRunningOperation, { method: "POST", body: "{}", baseUrl: SERVICE_USAGE_API });
         yield* api.waitForGoogleOperation(operation, SERVICE_USAGE_API);
       }
-      return { serviceName: name };
+      for (let poll = 0; poll < 90; poll += 1) {
+        current = yield* api.request(`confirm API ${news.service} is enabled`, resourcePath(name), ServiceUsageResponse, { baseUrl: SERVICE_USAGE_API });
+        if (current.state === "ENABLED") {
+          return {
+            serviceName: current.name,
+            projectNumber: serviceProjectNumber(current.name),
+          };
+        }
+        yield* Effect.sleep(Duration.seconds(2));
+      }
+      return yield* Effect.fail(
+        new GcpPlatformResourceError({
+          resource: name,
+          message: `${news.service} did not report ENABLED within 3 minutes`,
+        }),
+      );
     }),
     delete: () => Effect.void,
   });
@@ -569,11 +591,29 @@ export const GcpCloudRunServiceProvider = (api: GcpApi) =>
     }),
   });
 
-const iamApi = (target: GcpIamTarget) => target === "bucket" ? STORAGE_API : target === "secret" ? SECRET_MANAGER_API : CLOUD_RUN_API;
-const getPolicy = (api: GcpApi, props: GcpResourceIamBindingProps) =>
-  props.target === "bucket"
-    ? api.request(`get IAM policy for ${props.resourceName}`, `${bucketPath(props.resourceName)}/iam`, IamPolicyResponse, { baseUrl: STORAGE_API })
-    : api.request(`get IAM policy for ${props.resourceName}`, `${resourcePath(props.resourceName)}:getIamPolicy`, IamPolicyResponse, { baseUrl: iamApi(props.target) });
+const iamApi = (target: GcpIamTarget) =>
+  target === "project"
+    ? CLOUD_RESOURCE_MANAGER_API
+    : target === "bucket"
+      ? STORAGE_API
+      : target === "artifactRepository"
+        ? ARTIFACT_API
+        : target === "secret"
+          ? SECRET_MANAGER_API
+          : CLOUD_RUN_API;
+const getPolicy = (api: GcpApi, props: GcpResourceIamBindingProps) => {
+  if (props.target === "bucket") {
+    return api.request(`get IAM policy for ${props.resourceName}`, `${bucketPath(props.resourceName)}/iam`, IamPolicyResponse, { baseUrl: STORAGE_API });
+  }
+  return api.request(
+    `get IAM policy for ${props.resourceName}`,
+    `${resourcePath(props.resourceName)}:getIamPolicy`,
+    IamPolicyResponse,
+    props.target === "project"
+      ? { method: "POST", body: "{}", baseUrl: CLOUD_RESOURCE_MANAGER_API }
+      : { baseUrl: iamApi(props.target) },
+  );
+};
 const setPolicy = (api: GcpApi, props: GcpResourceIamBindingProps, policy: IamPolicy) =>
   props.target === "bucket"
     ? api.request(`set IAM policy for ${props.resourceName}`, `${bucketPath(props.resourceName)}/iam`, IamPolicyResponse, { method: "PUT", body: JSON.stringify(policy), baseUrl: STORAGE_API })

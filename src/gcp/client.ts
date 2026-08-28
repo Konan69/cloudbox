@@ -1,6 +1,7 @@
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import type { GcpCredentials } from "../config.ts";
@@ -82,6 +83,10 @@ export interface GcpApiOptions {
   readonly fetch?: typeof globalThis.fetch;
   readonly pollIntervalMs?: number;
   readonly maxOperationPolls?: number;
+  readonly networkRetryAttempts?: number;
+  readonly propagationRetryMaxMs?: number;
+  readonly retryBaseDelayMs?: number;
+  readonly retryMaxDelayMs?: number;
 }
 
 export interface GcpRequestOptions extends RequestInit {
@@ -98,12 +103,51 @@ const decodeApiError = (value: unknown): ApiErrorEnvelope | undefined => {
   }
 };
 
+const transientNetworkCodes = new Set([
+  "EAI_AGAIN",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+export const isTransientNetworkCause = (cause: unknown): boolean => {
+  const seen = new Set<unknown>();
+  let current: unknown = cause;
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current === "object") {
+      const record = current as { readonly code?: unknown; readonly message?: unknown; readonly cause?: unknown };
+      if (typeof record.code === "string" && transientNetworkCodes.has(record.code)) return true;
+      if (
+        typeof record.message === "string" &&
+        /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|network socket disconnected/iu.test(record.message)
+      ) return true;
+      current = record.cause;
+      continue;
+    }
+    return typeof current === "string" &&
+      /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|network socket disconnected/iu.test(current);
+  }
+  return false;
+};
+
+export const isApiPropagationError = (error: GcpApiError): boolean =>
+  error.status === 403 &&
+  /has not been used in project|API[^.]*is disabled|service is disabled|accessNotConfigured/iu.test(
+    error.message,
+  );
+
 export class GcpApi {
   readonly project: string;
   readonly #tokenProvider: AccessTokenProvider;
   readonly #fetch: typeof globalThis.fetch;
   readonly #pollIntervalMs: number;
   readonly #maxOperationPolls: number;
+  readonly #networkRetryAttempts: number;
+  readonly #propagationRetryMaxMs: number;
+  readonly #retryBaseDelayMs: number;
+  readonly #retryMaxDelayMs: number;
 
   constructor(options: GcpApiOptions) {
     this.project = options.project;
@@ -115,6 +159,10 @@ export class GcpApi {
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#pollIntervalMs = options.pollIntervalMs ?? 1_000;
     this.#maxOperationPolls = options.maxOperationPolls ?? 600;
+    this.#networkRetryAttempts = options.networkRetryAttempts ?? 5;
+    this.#propagationRetryMaxMs = options.propagationRetryMaxMs ?? 180_000;
+    this.#retryBaseDelayMs = options.retryBaseDelayMs ?? 1_000;
+    this.#retryMaxDelayMs = options.retryMaxDelayMs ?? 30_000;
   }
 
   projectPath(path: string): string {
@@ -132,7 +180,7 @@ export class GcpApi {
     S["DecodingServices"]
   > {
     const self = this;
-    return Effect.gen(function* () {
+    const once = Effect.gen(function* () {
       const token = yield* Effect.tryPromise({
         try: () => self.#tokenProvider(),
         catch: (cause) =>
@@ -206,6 +254,49 @@ export class GcpApi {
             }),
         ),
       );
+    });
+
+    return Effect.gen(function* () {
+      let networkAttempt = 1;
+      let propagationRetries = 0;
+      let propagationWaitMs = 0;
+      while (true) {
+        const result = yield* Effect.result(once);
+        if (Result.isSuccess(result)) return result.success;
+        const error = result.failure;
+        const networkCause = error._tag === "GcpAuthError" || error._tag === "GcpApiError"
+          ? error.cause
+          : undefined;
+        if (
+          isTransientNetworkCause(networkCause) &&
+          networkAttempt < self.#networkRetryAttempts
+        ) {
+          const delay = Math.min(
+            self.#retryBaseDelayMs * (2 ** (networkAttempt - 1)),
+            self.#retryMaxDelayMs,
+          );
+          networkAttempt += 1;
+          if (delay > 0) yield* Effect.sleep(Duration.millis(delay));
+          continue;
+        }
+        if (
+          error._tag === "GcpApiError" &&
+          isApiPropagationError(error) &&
+          propagationRetries < 16 &&
+          propagationWaitMs < self.#propagationRetryMaxMs
+        ) {
+          const delay = Math.min(
+            self.#retryBaseDelayMs * (2 ** propagationRetries),
+            self.#retryMaxDelayMs,
+            self.#propagationRetryMaxMs - propagationWaitMs,
+          );
+          propagationRetries += 1;
+          propagationWaitMs += delay;
+          if (delay > 0) yield* Effect.sleep(Duration.millis(delay));
+          continue;
+        }
+        return yield* Effect.fail(error);
+      }
     });
   }
 

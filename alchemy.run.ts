@@ -311,6 +311,7 @@ const deployGcp = (
       ),
     );
     const api = Object.fromEntries(apiNames.map((name, index) => [name, apis[index]!.serviceName]));
+    const projectNumber = apis[0]!.projectNumber;
     yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
       project: config.gcp.project,
       name: `${instanceName}-ssh`,
@@ -387,6 +388,29 @@ const deployGcp = (
       apiService: api["artifactregistry.googleapis.com"]!,
     });
     const imageUri = `${region}-docker.pkg.dev/${config.gcp.project}/cloudbox-wake/service:${archive.sha256}`;
+    const buildServiceAccountEmail = GCP.cloudBuildServiceAccountEmail(projectNumber);
+    const buildMember = GCP.iamServiceAccountMember(buildServiceAccountEmail);
+    const buildProjectBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeBuildProjectIam", {
+      target: "project",
+      resourceName: `projects/${config.gcp.project}`,
+      member: buildMember,
+      role: "roles/cloudbuild.builds.builder",
+      apiService: api["cloudbuild.googleapis.com"]!,
+    });
+    const buildSourceBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeBuildSourceIam", {
+      target: "bucket",
+      resourceName: sourceBucket.bucketName,
+      member: buildMember,
+      role: "roles/storage.objectViewer",
+      apiService: api["storage.googleapis.com"]!,
+    });
+    const buildRepositoryBinding = yield* GCP.GcpResourceIamBinding("CloudboxWakeBuildRepositoryIam", {
+      target: "artifactRepository",
+      resourceName: repository.name,
+      member: buildMember,
+      role: "roles/artifactregistry.writer",
+      apiService: api["artifactregistry.googleapis.com"]!,
+    });
     const build = yield* GCP.GcpCloudBuild("CloudboxWakeBuild", {
       project: config.gcp.project,
       location: region,
@@ -394,10 +418,12 @@ const deployGcp = (
       objectName: sourceObject.objectName,
       imageUri,
       sourceSha256: archive.sha256,
-      apiServices: [
+      dependencies: [
         api["cloudbuild.googleapis.com"]!,
         api["artifactregistry.googleapis.com"]!,
-        repository.name,
+        buildProjectBinding.role,
+        buildSourceBinding.role,
+        buildRepositoryBinding.role,
       ],
     });
     const wakeSecret = yield* Alchemy.makeRandom("CloudboxWakeBearerSecret", { bytes: 32 });

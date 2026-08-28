@@ -12,7 +12,10 @@ import type {
   GcpSecretVersionProps,
   GcpStorageObjectProps,
 } from "./platform.ts";
-import { iamServiceAccountMember } from "./outputWiring.ts";
+import {
+  cloudBuildServiceAccountEmail,
+  iamServiceAccountMember,
+} from "./outputWiring.ts";
 
 describe("Alchemy GCP resource-output wiring", () => {
   it("defers service-account IAM member interpolation", () => {
@@ -20,6 +23,7 @@ describe("Alchemy GCP resource-output wiring", () => {
 
     expect(() => iamServiceAccountMember(email)).not.toThrow();
     expect(Output.isOutput(iamServiceAccountMember(email))).toBe(true);
+    expect(Output.isOutput(cloudBuildServiceAccountEmail(Output.asOutput("123456789")))).toBe(true);
   });
 
   it("typechecks every cross-resource output as an Alchemy input", () => {
@@ -62,7 +66,7 @@ describe("Alchemy GCP resource-output wiring", () => {
       objectName: text,
       imageUri: "image",
       sourceSha256: "hash",
-      apiServices: [text, text],
+      dependencies: [text, text],
     } satisfies PropsInput<GcpCloudBuildProps>;
     const secretVersion = {
       secretName: text,
