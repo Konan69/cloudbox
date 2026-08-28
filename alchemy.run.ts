@@ -1,5 +1,4 @@
 // @effect-diagnostics anyUnknownInErrorContext:off layerMergeAllWithDependencies:off
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Alchemy from "alchemy";
 import * as AWS from "alchemy/AWS";
 import * as AWSRegion from "alchemy/AWS/Region";
@@ -13,7 +12,7 @@ import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 
 import { renderUserData } from "./src/bootstrap/render.ts";
-import { loadConfig } from "./src/config.ts";
+import { loadConfig, type CloudboxConfig } from "./src/config.ts";
 
 class DeploymentInputError extends Data.TaggedError("DeploymentInputError")<{
   readonly message: string;
@@ -25,51 +24,47 @@ const expandHome = (path: string): string =>
     ? NodePath.join(NodeOs.homedir(), path.slice(2))
     : NodePath.resolve(path);
 
-const deploymentInputs = Effect.gen(function* () {
-  const config = yield* loadConfig("cloudbox.json");
-  const fs = yield* FileSystem.FileSystem;
-  const sshPublicKey = yield* fs.readFileString(expandHome(config.sshPublicKeyPath)).pipe(
-    Effect.mapError(
-      (cause) =>
-        new DeploymentInputError({
-          message: `Cannot read sshPublicKeyPath ${config.sshPublicKeyPath}`,
-          cause,
-        }),
-    ),
-  );
-  const idleBundle = yield* fs.readFileString("dist/idle.mjs").pipe(
-    Effect.mapError(
-      (cause) =>
-        new DeploymentInputError({
-          message: "dist/idle.mjs is required; run pnpm build:idle",
-          cause,
-        }),
-    ),
-  );
-  const githubToken = yield* Effect.sync(() => process.env[config.t3.githubToken]).pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(Schema.NonEmptyString)),
-    Effect.mapError(
-      (cause) =>
-        new DeploymentInputError({
-          message: `Required environment variable ${config.t3.githubToken} is missing or empty`,
-          cause,
-        }),
-    ),
-  );
-  const userData = renderUserData({ config, sshPublicKey, githubToken, idleBundle });
-  if (Buffer.byteLength(userData, "utf8") > 16 * 1024) {
-    return yield* Effect.fail(
-      new DeploymentInputError({
-        message: "Rendered EC2 user data exceeds the 16 KiB launch limit",
-      }),
+const deploymentInputs = (config: CloudboxConfig) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const sshPublicKey = yield* fs.readFileString(expandHome(config.sshPublicKeyPath)).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DeploymentInputError({
+            message: `Cannot read sshPublicKeyPath ${config.sshPublicKeyPath}`,
+            cause,
+          }),
+      ),
     );
-  }
-  return { config, sshPublicKey, userData };
-}).pipe(Effect.provide(NodeServices.layer));
+    const idleBundle = yield* fs.readFileString("dist/idle.mjs").pipe(
+      Effect.mapError(
+        (cause) =>
+          new DeploymentInputError({
+            message: "dist/idle.mjs is required; run pnpm build:idle",
+            cause,
+          }),
+      ),
+    );
+    const userData = renderUserData({ config, sshPublicKey, idleBundle });
+    if (Buffer.byteLength(userData, "utf8") > 16 * 1024) {
+      return yield* Effect.fail(
+        new DeploymentInputError({
+          message: "Rendered EC2 user data exceeds the 16 KiB launch limit",
+        }),
+      );
+    }
+    return { sshPublicKey, userData };
+  });
 
-const { config, sshPublicKey, userData } = await Effect.runPromise(deploymentInputs);
+const awsProviders = Layer.unwrap(
+  loadConfig("cloudbox.json").pipe(
+    Effect.map((config) => Layer.mergeAll(AWS.providers(), AWSRegion.of(config.region))),
+    Effect.orDie,
+  ),
+);
 
-const instanceTemplate = JSON.stringify({
+const makeInstanceTemplate = (config: CloudboxConfig, userData: string) =>
+  JSON.stringify({
   AWSTemplateFormatVersion: "2010-09-09",
   Description: "Cloudbox hibernating personal development instance",
   Parameters: {
@@ -130,10 +125,13 @@ const instanceTemplate = JSON.stringify({
 export default Alchemy.Stack(
   "Cloudbox",
   {
-    providers: Layer.mergeAll(AWS.providers(), AWSRegion.of(config.region)),
+    providers: awsProviders,
     state: Alchemy.localState(),
   },
   Effect.gen(function* () {
+    const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
+    const { sshPublicKey, userData } = yield* deploymentInputs(config).pipe(Effect.orDie);
+    const instanceTemplate = makeInstanceTemplate(config, userData);
     const actualRegion = yield* AWSRegion.CurrentRegion;
     yield* Schema.decodeUnknownEffect(Schema.Literal(config.region))(actualRegion).pipe(
       Effect.mapError((cause) => new Config.ConfigError(cause)),
