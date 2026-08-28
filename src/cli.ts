@@ -1,10 +1,3 @@
-import {
-  DescribeInstancesCommand,
-  EC2Client,
-  StartInstancesCommand,
-  StopInstancesCommand,
-  waitUntilInstanceRunning,
-} from "@aws-sdk/client-ec2";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
@@ -19,9 +12,21 @@ import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./config.ts";
+import {
+  formatVerificationReport,
+  runAcceptanceSuite,
+  verificationReportJson,
+  verifyIdleSleep,
+  verifySleepRoundtrip,
+  type VerificationReport,
+} from "./acceptance/index.ts";
+import type { CloudboxConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
-import { GcpApi, Operation } from "./gcp/client.ts";
+import {
+  makeProviderLifecycle,
+  type ProviderInstance,
+  type ProviderLifecycle,
+} from "./provider/lifecycle.ts";
 
 export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
   readonly operation: string;
@@ -29,152 +34,28 @@ export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
   readonly cause?: unknown;
 }> {}
 
-const Ec2StateName = Schema.Literals([
-  "pending",
-  "running",
-  "shutting-down",
-  "terminated",
-  "stopping",
-  "stopped",
-]);
-
-type Ec2StateName = typeof Ec2StateName.Type;
-
-const DescribeInstancesResult = Schema.Struct({
-  Reservations: Schema.Array(
-    Schema.Struct({
-      Instances: Schema.Array(
-        Schema.Struct({
-          InstanceId: Schema.NonEmptyString,
-          State: Schema.Struct({ Name: Ec2StateName }),
-          PublicIpAddress: Schema.optional(Schema.NonEmptyString),
-        }),
-      ),
-    }),
-  ),
-});
-
-type BoxInstance = {
-  readonly instanceId: string;
-  readonly state: string;
-  readonly publicIp: string | undefined;
-};
+type BoxInstance = ProviderInstance;
 
 const cliError = (operation: string, message: string, cause?: unknown) =>
   new CloudboxCliError({ ...(cause === undefined ? {} : { cause }), operation, message });
-
-const aws = <A>(operation: string, request: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: request,
-    catch: (cause) => cliError(operation, `${operation} failed`, cause),
-  });
-
-const gcp = <A, E, R>(operation: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(
-    Effect.mapError((cause) => cliError(operation, `${operation} failed`, cause)),
-  );
-
-const GcpCliInstance = Schema.Struct({
-  name: Schema.NonEmptyString,
-  status: Schema.NonEmptyString,
-  labels: Schema.optional(
-    Schema.Struct({ cloudbox: Schema.optional(Schema.String) }),
-  ),
-  networkInterfaces: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        accessConfigs: Schema.optional(
-          Schema.Array(Schema.Struct({ natIP: Schema.optional(Schema.String) })),
-        ),
-      }),
-    ),
-  ),
-});
-
-const makeAwsClient = (config: AwsCloudboxConfig) => new EC2Client({ region: config.region });
-const makeGcpClient = (config: GcpCloudboxConfig) =>
-  new GcpApi({ project: config.gcp.project, credentials: config.gcp.credentials });
-const gcpInstanceName = (config: GcpCloudboxConfig) => `cloudbox-${config.name}`;
 
 const requireString = (operation: string, value: unknown) =>
   Schema.decodeUnknownEffect(Schema.NonEmptyString)(value).pipe(
     Effect.mapError((cause) => cliError(operation, `${operation} returned no value`, cause)),
   );
 
-const findAwsInstance = (config: AwsCloudboxConfig, client: EC2Client) =>
-  Effect.gen(function* () {
-    const response = yield* aws("DescribeInstances", () =>
-      client.send(
-        new DescribeInstancesCommand({
-          Filters: [
-            { Name: "tag:cloudbox", Values: [config.name] },
-            { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"] },
-          ],
-        }),
-      ),
-    );
-    const decoded = yield* Schema.decodeUnknownEffect(DescribeInstancesResult)(response).pipe(
-      Effect.mapError((cause) =>
-        cliError("DescribeInstances", "DescribeInstances returned an invalid response", cause),
-      ),
-    );
-    const instances = decoded.Reservations.flatMap((reservation) => reservation.Instances);
-    if (instances.length !== 1) {
-      return yield* Effect.fail(
-        cliError(
-          "find instance",
-          `Expected exactly one live AWS instance tagged cloudbox=${config.name}; found ${String(instances.length)}`,
-        ),
-      );
-    }
-    const instance = instances[0];
-    if (instance === undefined) {
-      return yield* Effect.fail(cliError("find instance", "AWS returned an empty instance list"));
-    }
-    return {
-      instanceId: instance.InstanceId,
-      state: instance.State.Name,
-      publicIp: instance.PublicIpAddress,
-    } satisfies BoxInstance;
-  });
-
-const findGcpInstance = (config: GcpCloudboxConfig, client: GcpApi) =>
-  Effect.gen(function* () {
-    const name = gcpInstanceName(config);
-    const instance = yield* gcp(
-      "get GCP instance",
-      client.requestOptional(
-        `get instance ${name}`,
-        client.projectPath(
-          `/zones/${encodeURIComponent(config.gcp.zone)}/instances/${encodeURIComponent(name)}`,
-        ),
-        GcpCliInstance,
-      ),
-    );
-    if (instance === undefined || instance.labels?.cloudbox !== config.name) {
-      return yield* Effect.fail(
-        cliError("find instance", `No owned GCP instance named ${name} in ${config.gcp.zone}`),
-      );
-    }
-    return {
-      instanceId: instance.name,
-      state: instance.status,
-      publicIp: instance.networkInterfaces?.[0]?.accessConfigs?.[0]?.natIP,
-    } satisfies BoxInstance;
-  });
-
-const findInstance = (config: CloudboxConfig) =>
-  config.provider === "aws"
-    ? findAwsInstance(config, makeAwsClient(config))
-    : findGcpInstance(config, makeGcpClient(config));
-
-const withBox = <A>(
-  effect: (config: CloudboxConfig, instance: BoxInstance) => Effect.Effect<A, CloudboxCliError>,
+const withBox = <A, E>(
+  effect: (
+    config: CloudboxConfig,
+    lifecycle: ProviderLifecycle,
+    instance: BoxInstance,
+  ) => Effect.Effect<A, E>,
 ) =>
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json");
-    const instance = yield* findInstance(config);
-    return yield* effect(config, instance);
+    const lifecycle = makeProviderLifecycle(config);
+    const instance = yield* lifecycle.status;
+    return yield* effect(config, lifecycle, instance);
   });
 
 const connectToPort = (host: string, port: number) =>
@@ -222,40 +103,10 @@ const runProcess = (command: string, args: ReadonlyArray<string>) =>
 
 const requirePublicIp = (instance: BoxInstance) => requireString("public IP", instance.publicIp);
 
-const waitForGcpRunning = (config: GcpCloudboxConfig, client: GcpApi) =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
-      const instance = yield* findGcpInstance(config, client);
-      if (instance.state === "RUNNING") return instance;
-      yield* Effect.sleep("5 seconds");
-    }
-    return yield* Effect.fail(cliError("wait for GCP instance", "Instance did not reach RUNNING in 10 minutes"));
-  });
-
-const runGcpAction = (
-  config: GcpCloudboxConfig,
-  client: GcpApi,
-  action: "start" | "resume" | "suspend",
-) =>
-  gcp(
-    `${action} GCP instance`,
-    Effect.gen(function* () {
-      const operation = yield* client.request(
-        `${action} instance`,
-        client.projectPath(
-          `/zones/${encodeURIComponent(config.gcp.zone)}/instances/${encodeURIComponent(gcpInstanceName(config))}/${action}`,
-        ),
-        Operation,
-        { method: "POST" },
-      );
-      yield* client.waitForOperation(operation, { zone: config.gcp.zone });
-    }),
-  );
-
 const statusCommand = Command.make("status").pipe(
   Command.withDescription("Show the box state and public IP."),
   Command.withHandler(() =>
-    withBox((config, instance) =>
+    withBox((config, _lifecycle, instance) =>
       Console.log(
         JSON.stringify(
           {
@@ -275,29 +126,9 @@ const statusCommand = Command.make("status").pipe(
 const wakeCommand = Command.make("wake").pipe(
   Command.withDescription("Start or resume the box, wait for SSH, then print its IP."),
   Command.withHandler(() =>
-    withBox((config, instance) =>
+    withBox((_config, lifecycle, _instance) =>
       Effect.gen(function* () {
-        let running: BoxInstance;
-        if (config.provider === "aws") {
-          const client = makeAwsClient(config);
-          if (instance.state !== "running" && instance.state !== "pending") {
-            yield* aws("StartInstances", () =>
-              client.send(new StartInstancesCommand({ InstanceIds: [instance.instanceId] })),
-            );
-          }
-          yield* aws("wait for instance running", () =>
-            waitUntilInstanceRunning(
-              { client, maxWaitTime: 600, minDelay: 5, maxDelay: 15 },
-              { InstanceIds: [instance.instanceId] },
-            ),
-          );
-          running = yield* findAwsInstance(config, client);
-        } else {
-          const client = makeGcpClient(config);
-          if (instance.state === "SUSPENDED") yield* runGcpAction(config, client, "resume");
-          else if (instance.state === "TERMINATED") yield* runGcpAction(config, client, "start");
-          running = yield* waitForGcpRunning(config, client);
-        }
+        const running = yield* lifecycle.wake;
         const publicIp = yield* requirePublicIp(running);
         yield* waitForSsh(publicIp);
         yield* Console.log(publicIp);
@@ -307,26 +138,9 @@ const wakeCommand = Command.make("wake").pipe(
 );
 
 const sleepCommand = Command.make("sleep").pipe(
-  Command.withDescription("Suspend the box while preserving memory (GCP limit: 60 days)."),
+  Command.withDescription("Hibernate or suspend the box through its provider."),
   Command.withHandler(() =>
-    withBox((config, instance) =>
-      config.provider === "aws"
-        ? aws("StopInstances", () =>
-            makeAwsClient(config).send(
-              new StopInstancesCommand({ InstanceIds: [instance.instanceId], Hibernate: true }),
-            ),
-          ).pipe(Effect.asVoid)
-        : instance.state === "SUSPENDED"
-          ? Effect.void
-          : instance.state === "RUNNING"
-            ? runGcpAction(config, makeGcpClient(config), "suspend")
-            : Effect.fail(
-                cliError(
-                  "suspend GCP instance",
-                  `Instance must be RUNNING or SUSPENDED; current state is ${instance.state}`,
-                ),
-              ),
-    ),
+    withBox((_config, lifecycle, _instance) => lifecycle.sleep),
   ),
 );
 
@@ -342,7 +156,7 @@ const expandHome = (path: string): string =>
 const syncCommand = Command.make("sync", { dryRun: dryRunFlag }).pipe(
   Command.withDescription("Rsync configured identity paths to the running box."),
   Command.withHandler(({ dryRun }) =>
-    withBox((config, instance) =>
+    withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
         const publicIp = yield* requirePublicIp(instance);
         for (const path of config.identity.paths) {
@@ -360,7 +174,7 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag }).pipe(
 const sshCommand = Command.make("ssh").pipe(
   Command.withDescription("Open an interactive SSH session to the running box."),
   Command.withHandler(() =>
-    withBox((config, instance) =>
+    withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
         const publicIp = yield* requirePublicIp(instance);
         yield* runProcess("ssh", [`${config.boxUser}@${publicIp}`]);
@@ -369,9 +183,92 @@ const sshCommand = Command.make("ssh").pipe(
   ),
 );
 
+const jsonFlag = Flag.boolean("json").pipe(
+  Flag.withDefault(false),
+  Flag.withDescription("Print machine-readable JSON instead of a table."),
+);
+
+const timeoutFlag = Flag.integer("timeout").pipe(
+  Flag.withDefault(7_200),
+  Flag.withDescription("Maximum time in seconds."),
+);
+
+const printVerificationReport = (report: VerificationReport, json: boolean) =>
+  Effect.gen(function* () {
+    yield* Console.log(json ? verificationReportJson(report) : formatVerificationReport(report));
+    if (!report.ok) {
+      yield* Effect.sync(() => {
+        process.exitCode = 1;
+      });
+    }
+  });
+
+const verifyCommand = Command.make("verify", {
+  host: Flag.string("host").pipe(Flag.withDescription("Public IP or hostname to verify.")),
+  expectVm: Flag.boolean("expect-vm").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription("Also launch and test an Incus VM through /dev/kvm."),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Run the end-to-end host acceptance suite over SSH."),
+  Command.withHandler(({ expectVm, host, json }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig("cloudbox.json");
+      const report = yield* runAcceptanceSuite(config, host, expectVm);
+      yield* printVerificationReport(report, json);
+    }),
+  ),
+);
+
+const verifySleepCommand = Command.make("verify-sleep", {
+  timeout: timeoutFlag,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Hibernate or suspend, wake, and prove memory survived."),
+  Command.withHandler(({ json, timeout }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig("cloudbox.json");
+      const report = yield* verifySleepRoundtrip(
+        config,
+        makeProviderLifecycle(config),
+        timeout,
+      );
+      yield* printVerificationReport(report, json);
+    }),
+  ),
+);
+
+const verifyIdleCommand = Command.make("verify-idle", {
+  timeout: timeoutFlag,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Leave the host untouched and verify automatic idle sleep."),
+  Command.withHandler(({ json, timeout }) =>
+    Effect.gen(function* () {
+      const config = yield* loadConfig("cloudbox.json");
+      const report = yield* verifyIdleSleep(
+        config,
+        makeProviderLifecycle(config),
+        timeout,
+      );
+      yield* printVerificationReport(report, json);
+    }),
+  ),
+);
+
 export const cloudbox = Command.make("cloudbox").pipe(
-  Command.withDescription("Control one personal Cloudbox machine on AWS or GCP."),
-  Command.withSubcommands([statusCommand, wakeCommand, sleepCommand, syncCommand, sshCommand]),
+  Command.withDescription("Control and verify one personal Cloudbox machine on AWS or GCP."),
+  Command.withSubcommands([
+    statusCommand,
+    wakeCommand,
+    sleepCommand,
+    syncCommand,
+    sshCommand,
+    verifyCommand,
+    verifySleepCommand,
+    verifyIdleCommand,
+  ]),
 );
 
 const program = Command.run(cloudbox, { version: "0.1.0" }).pipe(

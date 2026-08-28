@@ -19,7 +19,9 @@
     "destroy": "alchemy destroy",
     "test": "pnpm build:on-box && vitest run && pnpm test:bundles",
     "test:bundles": "node scripts/verify-on-box-bundles.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:bootstrap": "bash scripts/check-bootstrap.sh",
+    "verify": "pnpm typecheck && pnpm test && pnpm check:bootstrap"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "3.1120.0",
