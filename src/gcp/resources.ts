@@ -208,8 +208,26 @@ export const GcpFirewallRuleProvider = (api: GcpApi) =>
       if (name === undefined) return undefined;
       const firewall = yield* getFirewall(api, name);
       if (firewall === undefined) return undefined;
-      const attrs = firewallAttrs(firewall, olds?.targetTag ?? output?.targetTag ?? "");
-      return firewall.description === `SSH access for cloudbox ${olds?.cloudboxName ?? ""}`
+      const targetTag = olds?.targetTag ?? output?.targetTag;
+      if (targetTag === undefined) {
+        return yield* Effect.fail(
+          new GcpResourceError({
+            resource: name,
+            message: `Cannot read GCP firewall ${name}: target tag is missing from resource state`,
+          }),
+        );
+      }
+      const cloudboxName = olds?.cloudboxName;
+      if (cloudboxName === undefined) {
+        return yield* Effect.fail(
+          new GcpResourceError({
+            resource: name,
+            message: `Cannot read GCP firewall ${name}: owner name is missing from resource state`,
+          }),
+        );
+      }
+      const attrs = firewallAttrs(firewall, targetTag);
+      return firewall.description === `SSH access for cloudbox ${cloudboxName}`
         ? attrs
         : Unowned(attrs);
     }),
@@ -371,7 +389,15 @@ export const GcpInstanceProvider = (api: GcpApi) =>
       if (name === undefined || zone === undefined) return undefined;
       const instance = yield* getInstance(api, zone, name);
       if (instance === undefined) return undefined;
-      const dataDiskName = olds?.dataDiskName ?? output?.dataDiskName ?? "";
+      const dataDiskName = olds?.dataDiskName ?? output?.dataDiskName;
+      if (dataDiskName === undefined) {
+        return yield* Effect.fail(
+          new GcpResourceError({
+            resource: name,
+            message: `Cannot read GCP instance ${name}: data disk name is missing from resource state`,
+          }),
+        );
+      }
       const attrs = instanceAttrs(instance, dataDiskName);
       return instance.labels?.cloudbox === olds?.cloudboxName ? attrs : Unowned(attrs);
     }),
