@@ -23,10 +23,111 @@ export const SshCidr = Schema.String.pipe(
   ),
 );
 
+export const T3SettingsParityConfig = Schema.Struct({
+  enabled: Schema.Boolean,
+  keybindings: Schema.Boolean,
+});
+
 export const T3Config = Schema.Struct({
   repoUrl: Schema.NonEmptyString,
   branch: Schema.NonEmptyString,
+  settingsParity: T3SettingsParityConfig,
 });
+
+const hasNoControlCharacters = (value: string): boolean => !/[\u0000-\u001f\u007f]/u.test(value);
+
+const isGitCloneUrl = (value: string): boolean => {
+  if (!hasNoControlCharacters(value)) return false;
+  if (value.startsWith("https://") || value.startsWith("ssh://")) {
+    try {
+      const url = new URL(value);
+      return (
+        (url.protocol === "https:" || url.protocol === "ssh:") &&
+        url.hostname.length > 0 &&
+        url.pathname.length > 1
+      );
+    } catch {
+      return false;
+    }
+  }
+  if (value.includes("://")) return false;
+  const separator = value.indexOf(":");
+  if (separator <= 0 || separator === value.length - 1) return false;
+  const host = value.slice(0, separator);
+  return !host.includes("/") && !host.includes("\\") && !/\s/u.test(host);
+};
+
+export const RepoUrl = Schema.String.pipe(
+  Schema.refine((value): value is string => isGitCloneUrl(value), {
+    identifier: "RepoUrl",
+    description: "a git-cloneable HTTPS or SSH URL",
+  }),
+);
+
+export const RepoPath = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string => {
+      if (!value.startsWith("~/") || !hasNoControlCharacters(value)) return false;
+      const components = value.slice(2).split("/");
+      return (
+        components.length > 0 &&
+        components.every(
+          (component) => component.length > 0 && component !== "." && component !== "..",
+        )
+      );
+    },
+    {
+      identifier: "RepoPath",
+      description: "a repository path under the box user home, starting with ~/",
+    },
+  ),
+);
+
+const isGitBranchName = (value: string): boolean => {
+  if (
+    value.length === 0 ||
+    value !== value.trim() ||
+    value === "@" ||
+    value.startsWith("-") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.endsWith(".") ||
+    value.includes("//") ||
+    value.includes("..") ||
+    value.includes("@{") ||
+    !hasNoControlCharacters(value) ||
+    /[ ~^:?*[\\]/u.test(value)
+  ) {
+    return false;
+  }
+  return value
+    .split("/")
+    .every((component) => !component.startsWith(".") && !component.endsWith(".lock"));
+};
+
+export const RepoBranch = Schema.String.pipe(
+  Schema.refine((value): value is string => isGitBranchName(value), {
+    identifier: "RepoBranch",
+    description: "a valid Git branch name",
+  }),
+);
+
+export const RepoConfig = Schema.Struct({
+  url: RepoUrl,
+  path: RepoPath,
+  branch: Schema.optionalKey(RepoBranch),
+});
+
+export const ReposConfig = Schema.Array(RepoConfig).pipe(
+  Schema.refine(
+    (repos): repos is typeof repos =>
+      new Set(repos.map((repo) => repo.path)).size === repos.length,
+    {
+      identifier: "ReposConfig",
+      description: "repositories with unique paths",
+    },
+  ),
+);
 
 export const IdentityPath = Schema.String.pipe(
   Schema.refine((value): value is string => value.startsWith("~/"), {
@@ -102,6 +203,7 @@ const SharedConfig = {
   idleMinutes: PositiveInteger,
   t3: T3Config,
   identity: IdentityConfig,
+  repos: ReposConfig,
   boxUser: Schema.Literal("dev"),
 } as const;
 
@@ -124,6 +226,7 @@ export const GcpCloudboxConfig = Schema.Struct({
 
 export const CloudboxConfig = Schema.Union([AwsCloudboxConfig, GcpCloudboxConfig]);
 
+export type RepoConfig = typeof RepoConfig.Type;
 export type GcpCredentials = typeof GcpCredentials.Type;
 export type GcpHostConfig = typeof GcpConfig.Type;
 export type AwsCloudboxConfig = typeof AwsCloudboxConfig.Type;

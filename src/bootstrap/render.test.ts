@@ -17,12 +17,14 @@ const config = Schema.decodeUnknownSync(CloudboxConfig)({
   t3: {
     repoUrl: "https://github.com/example/t3code.git",
     branch: "main",
+    settingsParity: { enabled: true, keybindings: true },
   },
   identity: {
     paths: ["~/.pi/agent/settings.json"],
     excludes: ["sessions/"],
     maxTransferMb: 300,
   },
+  repos: [],
   boxUser: "dev",
 });
 

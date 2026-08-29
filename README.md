@@ -89,7 +89,26 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`:
+
+```json
+{
+  "t3": {
+    "repoUrl": "https://github.com/example/t3code.git",
+    "branch": "main",
+    "settingsParity": { "enabled": true, "keybindings": true }
+  },
+  "repos": [
+    {
+      "url": "git@github.com:owner/project.git",
+      "path": "~/src/project",
+      "branch": "main"
+    }
+  ]
+}
+```
+
+`repos[].branch` is optional. Repository URLs must use HTTPS, `ssh://`, or SSH's `user@host:path` form. Paths must start with `~/`, stay lexically and physically under the box user's home, and be unique. An empty `repos` array is valid.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
@@ -102,6 +121,8 @@ Identity paths must start with `~/`, so each path is translated from the laptop 
 Every real sync first runs rsync in dry-run mode and totals `Total transferred file size` across all paths. If that exceeds `identity.maxTransferMb`, the command lists each path's bytes and stops. Tighten `identity.excludes`, or use `cloudbox sync --force` after reviewing the totals.
 
 Credentials are copied only when explicitly listed in `identity.paths`. This includes `~/.codex/auth.json`, `~/.claude/.credentials.json`, and `~/.config/gh/hosts.yml`. The safer alternative is to omit those files and run `codex login`, `claude auth login`, and `gh auth login` once on the box.
+
+A real sync then clones missing configured repositories or runs only `git fetch --prune origin` when the destination's origin matches. It fails instead of overwriting an existing different path. HTTPS operations use `gh auth git-credential`, backed by the GitHub CLI identity already pushed to the host. Git output is streamed and is not covered by `identity.maxTransferMb`. After repositories, enabled settings parity deep-merges an explicit portable allow-list from local `~/.t3/userdata/settings.json`; optional keybindings are copied verbatim. Absolute-path and secret-bearing settings are never copied. Restart T3 manually when sync reports changed fields. `--dry-run` performs none of these repository or settings writes.
 
 ## Build and verify locally
 

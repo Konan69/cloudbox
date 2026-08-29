@@ -11,8 +11,13 @@ const shared = {
   name: "dev",
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
-  t3: { repoUrl: "https://example.test/t3.git", branch: "main" },
+  t3: {
+    repoUrl: "https://example.test/t3.git",
+    branch: "main",
+    settingsParity: { enabled: true, keybindings: true },
+  },
   identity: { paths: ["~/.pi/"], excludes: ["sessions/"], maxTransferMb: 100 },
+  repos: [],
   boxUser: "dev" as const,
 };
 

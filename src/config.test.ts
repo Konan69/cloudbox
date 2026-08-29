@@ -15,12 +15,17 @@ const valid = {
   t3: {
     repoUrl: "https://github.com/example/t3code.git",
     branch: "main",
+    settingsParity: { enabled: true, keybindings: true },
   },
   identity: {
     paths: ["~/.pi/agent/settings.json"],
     excludes: ["sessions/"],
     maxTransferMb: 300,
   },
+  repos: [
+    { url: "https://github.com/example/one.git", path: "~/src/one", branch: "main" },
+    { url: "git@github.com:example/two.git", path: "~/src/two" },
+  ],
   boxUser: "dev",
 };
 
@@ -41,6 +46,7 @@ const validGcp = {
   idleMinutes: valid.idleMinutes,
   t3: valid.t3,
   identity: valid.identity,
+  repos: valid.repos,
   boxUser: valid.boxUser,
 };
 
@@ -51,6 +57,8 @@ describe("CloudboxConfig", () => {
       expect(config.provider).toBe("aws");
       if (config.provider === "aws") expect(config.instanceType).toBe("m7i.4xlarge");
       expect(config.boxUser).toBe("dev");
+      expect(config.repos).toHaveLength(2);
+      expect(config.t3.settingsParity).toEqual({ enabled: true, keybindings: true });
     }),
   );
 
@@ -144,6 +152,41 @@ describe("CloudboxConfig", () => {
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("identity");
+    }),
+  );
+
+  it.effect("validates repository URLs, home-relative paths, and unique destinations", () =>
+    Effect.gen(function* () {
+      for (const repos of [
+        [{ url: "http://github.com/example/repo.git", path: "~/src/repo" }],
+        [{ url: "file:///tmp/repo", path: "~/src/repo" }],
+        [{ url: "https://github.com/example/repo.git", path: "/srv/repo" }],
+        [{ url: "https://github.com/example/repo.git", path: "~/../repo" }],
+        [{ url: "https://github.com/example/repo.git", path: "~/src/repo", branch: "bad..branch" }],
+        [
+          { url: "https://github.com/example/one.git", path: "~/src/repo" },
+          { url: "ssh://git@github.com/example/two.git", path: "~/src/repo" },
+        ],
+      ]) {
+        const error = yield* parseConfig(
+          "cloudbox.json",
+          JSON.stringify({ ...valid, repos }),
+        ).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(ConfigError);
+        expect(error.message).toContain("repos");
+      }
+    }),
+  );
+
+  it.effect("requires explicit T3 settings parity controls", () =>
+    Effect.gen(function* () {
+      const { settingsParity: _removed, ...t3 } = valid.t3;
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...valid, t3 }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("settingsParity");
     }),
   );
 

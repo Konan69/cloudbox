@@ -10,6 +10,27 @@ Terminology follows this tree: one running server is an `ExecutionEnvironment`; 
 
 ---
 
+## Parity via cloudbox sync
+
+T3 still does not replicate repositories, settings, projects, or threads. `cloudbox sync` supplies three one-way local → host parity layers:
+
+1. Identity paths are rsynced and published as the machine-identity manifest.
+2. Each configured `repos[]` destination is cloned when missing. A matching Git repository receives only `git fetch --prune origin`; its checkout and working tree are never changed. An existing non-repository or origin mismatch stops sync without overwriting anything.
+3. With `t3.settingsParity.enabled`, local server settings are explicitly filtered and deep-merged over the host's `~/.t3/userdata/settings.json`. With `keybindings: true`, the local keybindings file is copied verbatim.
+
+Repository parity is not subject to `identity.maxTransferMb`; Git streams its own clone/fetch output. A dry run performs only identity rsync inspection and does not clone, fetch, or publish T3 settings.
+
+The settings top-level allow-list is `enableLegacyTokenStreaming`, `enableProviderUpdateChecks`, `enableAgentBrowserAccess`, `backgroundActivity`, `automaticGitFetchInterval`, `providerHealthRefreshInterval`, `backgroundActivityProfile`, `defaultThreadEnvMode`, `newWorktreesStartFromOrigin`, `textGenerationModelSelection`, `sourceControlWritingStyle`, `sourceControlWriterModelSelection`, `providers`, `providerInstances`, and `observability`. Nested objects have their own explicit allow-lists:
+
+- `backgroundActivity`: `schemaVersion`, `profile`, `baseProfile`, and the documented override fields.
+- model selections: `instanceId`, `model`, `options`; source-control style: `mode`, `customInstructions`, `followChangeRequestTemplates`; observability: `otlpTracesUrl`, `otlpMetricsUrl`.
+- provider configs: portable enablement/custom models plus `claudeAgent.autoCompactWindow`, `cursor.apiEndpoint`, `opencode.serverUrl`, and pi's `defaultModel`/`excludedProviders`.
+- provider-instance envelopes: `driver`, `displayName`, `accentColor`, `enabled`; known built-in `config` uses the same provider allow-list. `environment` and unknown-driver opaque `config` are omitted.
+
+The filter never copies `binaryPath`, provider home/shadow-home paths, `addProjectBaseDirectory`, launch arguments, OpenCode `serverPassword`, provider-instance environment variables, or any non-allow-listed field. The deep merge preserves those host-specific values already on the box. It does not read or write `environment-id`, `secrets/`, or `state.sqlite`. Sync prints changed field paths and reminds the user to restart T3, but does not restart it.
+
+---
+
 ## 1. State per environment
 
 ### 1.1 Server-owned layout under `T3CODE_HOME`

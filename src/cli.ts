@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Console from "effect/Console";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
@@ -24,7 +25,7 @@ import {
   makeSshThreadSmokeTransport,
   runThreadSmokeSuite,
 } from "./acceptance/threadSmoke.ts";
-import type { CloudboxConfig } from "./config.ts";
+import type { CloudboxConfig, RepoConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
   deriveMachineIdentityManifest,
@@ -44,6 +45,19 @@ import {
   SshTransportError,
   type SshTransport,
 } from "./ssh/transport.ts";
+import {
+  buildRepoCloneScript,
+  buildRepoFetchScript,
+  buildRepoInspectScript,
+  parseRepoInspection,
+  RepoParityError,
+  runRepoParity,
+  type RepoSyncOperator,
+} from "./sync/repos.ts";
+import {
+  buildT3ParityPublishScript,
+  filterPortableT3Settings,
+} from "./t3/settingsParity.ts";
 
 export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
   readonly operation: string;
@@ -61,12 +75,12 @@ const requireString = (operation: string, value: unknown) =>
     Effect.mapError((cause) => cliError(operation, `${operation} returned no value`, cause)),
   );
 
-const withBox = <A, E>(
+const withBox = <A, E, R>(
   effect: (
     config: CloudboxConfig,
     lifecycle: ProviderLifecycle,
     instance: BoxInstance,
-  ) => Effect.Effect<A, E>,
+  ) => Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json");
@@ -118,6 +132,7 @@ const runCapturedProcess = (
   command: string,
   args: ReadonlyArray<string>,
   input?: string,
+  streamOutput = true,
 ) =>
   Effect.callback<ProcessOutput, CloudboxCliError>((resume) => {
     const child = spawn(command, [...args], {
@@ -148,12 +163,12 @@ const runCapturedProcess = (
     child.stdout.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
       stdout += text;
-      process.stdout.write(text);
+      if (streamOutput) process.stdout.write(text);
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
       stderr += text;
-      process.stderr.write(text);
+      if (streamOutput) process.stderr.write(text);
     });
     child.once("error", (cause) =>
       complete(Effect.fail(cliError(command, `Could not start ${command}`, cause))),
@@ -667,8 +682,124 @@ const liveIdentityManifestPublisher: IdentityManifestPublisher = ({
     Effect.map(() => undefined),
   );
 
+const remoteRepoError = (
+  repo: RepoConfig,
+  operation: string,
+  cause: CloudboxCliError,
+) =>
+  new RepoParityError({
+    path: repo.path,
+    message: `${operation} failed for ${repo.path}: ${cause.message}`,
+    cause,
+  });
+
+const makeLiveRepoSyncOperator = (transport: SshTransport): RepoSyncOperator => {
+  const remoteArgs = [...transport.args({ batchMode: true }), "bash", "-s"];
+  return {
+    inspect: (repo) =>
+      runCapturedProcess("ssh", remoteArgs, buildRepoInspectScript(repo), false).pipe(
+        Effect.mapError((cause) => remoteRepoError(repo, "Repository inspection", cause)),
+        Effect.flatMap((output) =>
+          Effect.try({
+            try: () => parseRepoInspection(output.stdout),
+            catch: (cause) =>
+              new RepoParityError({
+                path: repo.path,
+                message: `Could not parse repository inspection for ${repo.path}`,
+                cause,
+              }),
+          }),
+        ),
+      ),
+    clone: (repo) =>
+      runCapturedProcess("ssh", remoteArgs, buildRepoCloneScript(repo)).pipe(
+        Effect.mapError((cause) => remoteRepoError(repo, "git clone", cause)),
+        Effect.map(() => undefined),
+      ),
+    fetch: (repo) =>
+      runCapturedProcess("ssh", remoteArgs, buildRepoFetchScript(repo)).pipe(
+        Effect.mapError((cause) => remoteRepoError(repo, "git fetch --prune origin", cause)),
+        Effect.map(() => undefined),
+      ),
+  };
+};
+
+const readOptionalParityFile = (path: string, label: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const exists = yield* fs.exists(path).pipe(
+      Effect.mapError((cause) =>
+        cliError("T3 settings parity", `Could not check local ${label} at ${path}`, cause),
+      ),
+    );
+    if (!exists) {
+      yield* Console.log(`T3 ${label} parity skipped: local file missing: ${path}`);
+      return undefined;
+    }
+    return yield* fs.readFileString(path).pipe(
+      Effect.mapError((cause) =>
+        cliError("T3 settings parity", `Could not read local ${label} at ${path}`, cause),
+      ),
+    );
+  });
+
+const runT3SettingsParity = (
+  localHome: string,
+  keybindingsEnabled: boolean,
+  transport: SshTransport,
+) =>
+  Effect.gen(function* () {
+    const settingsPath = NodePath.join(localHome, ".t3", "userdata", "settings.json");
+    const settingsContents = yield* readOptionalParityFile(settingsPath, "settings");
+    let settingsJson: string | undefined;
+    if (settingsContents !== undefined) {
+      const parsed = yield* Effect.try({
+        try: (): unknown => {
+          const value: unknown = JSON.parse(settingsContents);
+          if (value === null || typeof value !== "object" || Array.isArray(value)) {
+            throw new Error("settings root must be a JSON object");
+          }
+          return value;
+        },
+        catch: (cause) =>
+          cliError("T3 settings parity", `Invalid local T3 settings JSON at ${settingsPath}`, cause),
+      });
+      settingsJson = `${JSON.stringify(filterPortableT3Settings(parsed), null, 2)}\n`;
+    }
+
+    let keybindings: string | undefined;
+    if (keybindingsEnabled) {
+      const keybindingsPath = NodePath.join(
+        localHome,
+        ".t3",
+        "userdata",
+        "keybindings.json",
+      );
+      keybindings = yield* readOptionalParityFile(keybindingsPath, "keybindings");
+    }
+
+    if (settingsJson === undefined && keybindings === undefined) return;
+    const payload = {
+      ...(settingsJson === undefined ? {} : { settingsJson }),
+      ...(keybindings === undefined ? {} : { keybindings }),
+    };
+    yield* runCapturedProcess(
+      "ssh",
+      [...transport.args({ batchMode: true }), "bash", "-s"],
+      buildT3ParityPublishScript(payload),
+    ).pipe(
+      Effect.mapError((cause) =>
+        cliError(
+          "T3 settings parity",
+          `Failed to publish filtered T3 settings: ${cause.message}`,
+          cause,
+        ),
+      ),
+    );
+  });
+
 const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag }).pipe(
-  Command.withDescription("Rsync configured identity paths to the running box."),
+  Command.withDescription("Push identity, repositories, and filtered T3 settings to the running box."),
   Command.withHandler(({ dryRun, force }) =>
     withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
@@ -676,12 +807,13 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
           ? yield* requirePublicIp(instance)
           : undefined;
         const transport = yield* makeSshTransport(config, awsHost);
+        const localHome = NodeOs.homedir();
         yield* runIdentitySync(
           {
             paths: config.identity.paths,
             excludes: config.identity.excludes,
             maxTransferMb: config.identity.maxTransferMb,
-            localHome: NodeOs.homedir(),
+            localHome,
             boxUser: config.boxUser,
             transport,
             dryRun,
@@ -690,6 +822,19 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
           liveRsyncRunner,
           liveIdentityManifestPublisher,
         );
+        if (dryRun) return;
+        yield* runRepoParity(config.repos, makeLiveRepoSyncOperator(transport)).pipe(
+          Effect.mapError((cause) =>
+            cliError("repository parity", cause.message, cause),
+          ),
+        );
+        if (config.t3.settingsParity.enabled) {
+          yield* runT3SettingsParity(
+            localHome,
+            config.t3.settingsParity.keybindings,
+            transport,
+          );
+        }
       }),
     ),
   ),

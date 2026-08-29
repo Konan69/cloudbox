@@ -34,6 +34,20 @@ systemctl --user restart t3code-fork.service
 
 A successful sync verifies that every manifest `hostPath` is an existing host directory. Treat a missing-directory failure as an incomplete identity push, not as a warning.
 
+## Environment parity via sync
+
+The focused local tests are:
+
+```bash
+pnpm exec vitest run src/config.test.ts src/sync/repos.test.ts src/t3/settingsParity.test.ts src/cli.test.ts
+```
+
+They cover the three repository decisions (missing → clone, matching origin → fetch, existing non-repo or different origin → fail), shell syntax, config URL/path/duplicate validation, the T3 settings allow-list, path/secret removal, atomic deep merge over host settings, keybindings byte-for-byte copy, and the no-restart reminder.
+
+Repository parity runs only on a real `cloudbox sync`, after identity publication. Clone and fetch output is streamed; HTTPS operations expose the synced GitHub CLI identity through `gh auth git-credential`. An existing matching repository gets only `git fetch --prune origin`; tests reject accidental `checkout`, `reset`, or `pull` commands. The before/after `refs/remotes/origin` fingerprint selects the final `fetched` or `unchanged` line. `identity.maxTransferMb` does not apply to Git traffic.
+
+When `t3.settingsParity.enabled` is true, sync reads local `~/.t3/userdata/settings.json`. A missing file is a clear skip. The test fixture proves that portable provider/default/background/source-control/observability fields remain while binary/home/worktree paths, provider environment values, passwords, opaque unknown-driver config, and unrelated state fields are absent. With `keybindings: true`, `keybindings.json` is copied verbatim or skipped clearly when missing. The publisher never touches `environment-id`, `secrets/`, or `state.sqlite`, and it never restarts T3.
+
 ## Remote acceptance
 
 ```bash

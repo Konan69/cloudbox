@@ -11,7 +11,11 @@
   "idleMinutes": 30,
   "t3": {
     "repoUrl": "https://github.com/example/t3code.git",
-    "branch": "main"
+    "branch": "main",
+    "settingsParity": {
+      "enabled": true,
+      "keybindings": true
+    }
   },
   "identity": {
     "paths": [
@@ -36,5 +40,6 @@
     ],
     "maxTransferMb": 300
   },
+  "repos": [],
   "boxUser": "dev"
 }
