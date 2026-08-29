@@ -1,5 +1,8 @@
 # cloudbox
 
+Read the [product description](docs/product-description.md) for the user-visible lifecycle,
+selective loadout behavior, provisioning/upgrade boundary, mobile support, and verified gaps.
+
 One personal AWS EC2 or Google Compute Engine development machine for dev. It runs the patched T3 Code fork headlessly, suspends after sustained inactivity, and is controlled from a laptop with an Effect CLI.
 
 ## What it creates
