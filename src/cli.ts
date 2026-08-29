@@ -451,6 +451,8 @@ export const buildRsyncArgs = ({
   const remotePath = directory ? withTrailingSlash(path) : path;
   return [
     "-az",
+    // Replace a non-empty directory on the box when the local side became a symlink/file.
+    "--force",
     "--mkpath",
     "--info=stats2,name1",
     "-e",
