@@ -216,6 +216,7 @@ phone approve/monitor a durable desktop/runner operation; backgrounding cannot s
 A homelab-like cloud pool with agent routing is later. The current implementation does not claim a
 scheduler, distributed filesystem, multi-box coherence, or automatic provisioning. When built,
 each writable workspace should have one owner; agents exchange commits, checkpoints and artifacts.
+The transport and delivery boundary is defined in [box communications](box-communications.md).
 
 ## Verification record
 
