@@ -19,6 +19,7 @@ import { renderFetchWrapper, renderHostBootstrap } from "./src/bootstrap/render-
 import { renderUserData } from "./src/bootstrap/render.ts";
 import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
 import { loadConfig } from "./src/config.ts";
+import { guardProviderChange } from "./src/deployment/providerGuard.ts";
 import * as GCP from "./src/gcp/index.ts";
 
 class DeploymentInputError extends Data.TaggedError("DeploymentInputError")<{
@@ -589,6 +590,14 @@ export default Alchemy.Stack(
   { providers: cloudProviders, state: Alchemy.localState() },
   Effect.gen(function* () {
     const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
+    yield* Effect.tryPromise({
+      try: () => guardProviderChange(config.provider),
+      catch: (cause) =>
+        new DeploymentInputError({
+          message: cause instanceof Error ? cause.message : "Cannot verify the deployed provider",
+          cause,
+        }),
+    }).pipe(Effect.orDie);
     const inputs = yield* deploymentInputs(config).pipe(Effect.orDie);
     return config.provider === "aws"
       ? yield* deployAws(
