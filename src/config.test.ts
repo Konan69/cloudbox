@@ -24,6 +24,26 @@ const valid = {
   boxUser: "dev",
 };
 
+const validGcp = {
+  provider: "gcp" as const,
+  name: valid.name,
+  gcp: {
+    project: "cloudbox-project",
+    zone: "us-central1-a",
+    machineType: "n2-standard-16",
+    bootDiskGb: 50,
+    dataDiskGb: 300,
+    dataDiskType: "pd-ssd",
+    credentials: "adc",
+  },
+  wake: { allowedOrigins: ["https://app.example.test", "http://localhost:3000"] },
+  sshPublicKeyPath: valid.sshPublicKeyPath,
+  idleMinutes: valid.idleMinutes,
+  t3: valid.t3,
+  identity: valid.identity,
+  boxUser: valid.boxUser,
+};
+
 describe("CloudboxConfig", () => {
   it.effect("decodes a complete config", () =>
     Effect.gen(function* () {
@@ -47,48 +67,69 @@ describe("CloudboxConfig", () => {
 
   it.effect("decodes GCP without any SSH CIDR", () =>
     Effect.gen(function* () {
-      const { aws: _aws, region: _region, instanceType: _instanceType, diskGb: _diskGb, ...shared } = valid;
-      const config = yield* parseConfig(
-        "cloudbox.json",
-        JSON.stringify({
-          ...shared,
-          provider: "gcp",
-          gcp: {
-            project: "cloudbox-project",
-            zone: "us-central1-a",
-            machineType: "n2-standard-16",
-            bootDiskGb: 50,
-            dataDiskGb: 300,
-            dataDiskType: "pd-ssd",
-            credentials: "adc",
-          },
-        }),
-      );
+      const config = yield* parseConfig("cloudbox.json", JSON.stringify(validGcp));
       expect(config.provider).toBe("gcp");
       if (config.provider === "gcp") expect(config.gcp.zone).toBe("us-central1-a");
+      expect("sshCidr" in config).toBe(false);
     }),
   );
 
   it.effect("hard-fails when required GCP values are missing", () =>
     Effect.gen(function* () {
-      const { aws: _aws, region: _region, instanceType: _instanceType, diskGb: _diskGb, ...shared } = valid;
+      const { credentials: _credentials, ...gcpWithoutCredentials } = validGcp.gcp;
       const error = yield* parseConfig(
         "cloudbox.json",
-        JSON.stringify({
-          ...shared,
-          provider: "gcp",
-          gcp: {
-            project: "cloudbox-project",
-            zone: "us-central1-a",
-            machineType: "n2-standard-16",
-            bootDiskGb: 50,
-            dataDiskGb: 300,
-            dataDiskType: "pd-ssd",
-          },
-        }),
+        JSON.stringify({ ...validGcp, gcp: gcpWithoutCredentials }),
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("credentials");
+    }),
+  );
+
+  it.effect("requires a non-empty wake allowedOrigins list for GCP", () =>
+    Effect.gen(function* () {
+      const config = yield* parseConfig("cloudbox.json", JSON.stringify(validGcp));
+      expect(config.provider).toBe("gcp");
+      if (config.provider === "gcp") {
+        expect(config.wake.allowedOrigins).toEqual([
+          "https://app.example.test",
+          "http://localhost:3000",
+        ]);
+      }
+
+      const emptyError = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...validGcp, wake: { allowedOrigins: [] } }),
+      ).pipe(Effect.flip);
+      expect(emptyError).toBeInstanceOf(ConfigError);
+      expect(emptyError.message).toContain("allowedOrigins");
+
+      const { wake: _wake, ...missingWake } = validGcp;
+      const missingError = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify(missingWake),
+      ).pipe(Effect.flip);
+      expect(missingError).toBeInstanceOf(ConfigError);
+      expect(missingError.message).toContain("wake");
+    }),
+  );
+
+  it.effect("rejects wake origins with paths or wildcards", () =>
+    Effect.gen(function* () {
+      for (const origin of [
+        "https://app.example.test/not-an-origin",
+        "https://*.example.test",
+      ]) {
+        const error = yield* parseConfig(
+          "cloudbox.json",
+          JSON.stringify({
+            ...validGcp,
+            wake: { allowedOrigins: [origin] },
+          }),
+        ).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(ConfigError);
+        expect(error.message).toContain('["wake"]["allowedOrigins"][0]');
+      }
     }),
   );
 

@@ -10,6 +10,9 @@
     "dataDiskType": "pd-balanced",
     "credentials": "adc"
   },
+  "wake": {
+    "allowedOrigins": ["https://your-t3-client.example.com"]
+  },
   "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
   "idleMinutes": 10,
   "t3": {

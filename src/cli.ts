@@ -205,6 +205,12 @@ const WakeServiceResponse = Schema.Struct({
   state: Schema.Literals(["running", "resuming"]),
 });
 
+const WakeStatusResponse = Schema.Struct({
+  state: Schema.Literals(["suspended", "running", "resuming", "stopped", "other"]),
+  gceStatus: Schema.String,
+  name: Schema.NonEmptyString,
+});
+
 export const requestWakeViaService = (
   name: string,
   url: string,
@@ -252,6 +258,53 @@ export const requestWakeViaService = (
     );
   });
 
+export const requestWakeStatusViaService = (
+  name: string,
+  url: string,
+  secret: string,
+  fetchImpl: typeof fetch = fetch,
+) =>
+  Effect.gen(function* () {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(`${url.replace(/\/$/u, "")}/status/${encodeURIComponent(name)}`);
+    } catch (cause) {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL is not a valid URL", cause),
+      );
+    }
+    if (endpoint.protocol !== "https:" && endpoint.hostname !== "localhost") {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL must use HTTPS"),
+      );
+    }
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetchImpl(endpoint, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${secret}`, Accept: "application/json" },
+        }),
+      catch: (cause) => cliError("wake service", "Wake status request failed", cause),
+    });
+    const text = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (cause) => cliError("wake service", "Could not read wake status response", cause),
+    });
+    if (!response.ok) {
+      return yield* Effect.fail(
+        cliError(
+          "wake service",
+          `Wake status returned HTTP ${String(response.status)}${text.length === 0 ? "" : `: ${text}`}`,
+        ),
+      );
+    }
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WakeStatusResponse))(text).pipe(
+      Effect.mapError((cause) =>
+        cliError("wake service", "Wake status returned an invalid response", cause),
+      ),
+    );
+  });
+
 const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -265,25 +318,47 @@ const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
   });
 
 const statusCommand = Command.make("status").pipe(
-  Command.withDescription("Show the box state and access path."),
+  Command.withDescription("Show the box state, access path, and wake-service view."),
   Command.withHandler(() =>
     withBox((config, _lifecycle, instance) =>
-      Console.log(
-        JSON.stringify(
-          {
-            provider: config.provider,
-            instanceName: config.provider === "gcp" ? instance.instanceId : undefined,
-            instanceId: instance.instanceId,
-            zone: config.provider === "gcp" ? config.gcp.zone : undefined,
-            region: config.provider === "aws" ? config.region : undefined,
-            state: instance.state,
-            access: config.provider === "gcp" ? "ssh via IAP" : "direct SSH",
-            publicIp: instance.publicIp,
-          },
-          null,
-          2,
-        ),
-      ),
+      Effect.gen(function* () {
+        yield* Console.log(
+          JSON.stringify(
+            {
+              provider: config.provider,
+              instanceName: config.provider === "gcp" ? instance.instanceId : undefined,
+              instanceId: instance.instanceId,
+              zone: config.provider === "gcp" ? config.gcp.zone : undefined,
+              region: config.provider === "aws" ? config.region : undefined,
+              state: instance.state,
+              access: config.provider === "gcp" ? "ssh via IAP" : "direct SSH",
+              publicIp: instance.publicIp,
+            },
+            null,
+            2,
+          ),
+        );
+
+        const wakeUrl = process.env.CLOUDBOX_WAKE_URL?.trim();
+        const wakeSecret = process.env.CLOUDBOX_WAKE_SECRET?.trim();
+        const missing = [
+          ...(wakeUrl === undefined || wakeUrl.length === 0 ? ["CLOUDBOX_WAKE_URL"] : []),
+          ...(wakeSecret === undefined || wakeSecret.length === 0
+            ? ["CLOUDBOX_WAKE_SECRET"]
+            : []),
+        ];
+        if (missing.length > 0) {
+          yield* Console.log(`Wake service: skipped (${missing.join(" and ")} not set).`);
+          return;
+        }
+
+        const serviceStatus = yield* requestWakeStatusViaService(
+          config.name,
+          wakeUrl!,
+          wakeSecret!,
+        );
+        yield* Console.log(`Wake service: ${JSON.stringify(serviceStatus)}`);
+      }),
     ),
   ),
 );
@@ -449,6 +524,7 @@ export interface IdentitySyncInput {
   readonly excludes: ReadonlyArray<string>;
   readonly maxTransferMb: number;
   readonly localHome: string;
+  readonly boxUser: string;
   readonly transport: SshTransport;
   readonly dryRun: boolean;
   readonly force: boolean;
@@ -457,7 +533,7 @@ export interface IdentitySyncInput {
 export interface IdentityManifestPublishInput {
   readonly manifest: MachineIdentityManifest;
   readonly boxUser: string;
-  readonly publicIp: string;
+  readonly transport: SshTransport;
 }
 
 export type IdentityManifestPublisher = (
@@ -562,7 +638,7 @@ export const runIdentitySync = (
     yield* publishManifest({
       manifest: deriveMachineIdentityManifest(input.paths, input.boxUser),
       boxUser: input.boxUser,
-      publicIp: input.publicIp,
+      transport: input.transport,
     });
   });
 };
@@ -572,11 +648,11 @@ const liveRsyncRunner: RsyncRunner = (_path, args) => runCapturedProcess("rsync"
 const liveIdentityManifestPublisher: IdentityManifestPublisher = ({
   manifest,
   boxUser,
-  publicIp,
+  transport,
 }) =>
   runCapturedProcess(
     "ssh",
-    [`${boxUser}@${publicIp}`, "bash", "-s"],
+    [...transport.args({ batchMode: true }), "bash", "-s"],
     buildIdentityManifestPublishScript(manifest, boxUser),
   ).pipe(
     Effect.mapError((cause) =>
@@ -604,6 +680,7 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
             excludes: config.identity.excludes,
             maxTransferMb: config.identity.maxTransferMb,
             localHome: NodeOs.homedir(),
+            boxUser: config.boxUser,
             transport,
             dryRun,
             force,

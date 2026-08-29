@@ -10,6 +10,17 @@ Do **not** wake on every ordinary reconnect. T3 starts supervisors for all persi
 
 Design A is the best upstream product architecture, because it keeps wake credentials and rate limits in the authenticated relay. It is not the best first deployment for dev: `relay.t3.codes` would need to ship the feature, or dev would have to operate a full relay stack. Design C avoids T3 changes but either wakes for unauthenticated traffic or becomes a second authenticated proxy in the application data path.
 
+## Service API
+
+The deployed Cloud Run service accepts `Authorization: Bearer <CLOUDBOX_WAKE_SECRET>` on two name-scoped routes:
+
+- `POST /wake/<name>` starts or resumes the configured GCE instance and uses the 60-second GCS rate stamp.
+- `GET /status/<name>` returns `{ "state", "gceStatus", "name" }` without changing the instance or rate stamp. `state` is `suspended`, `running`, `resuming`, `stopped`, or `other`; responses use `Cache-Control: no-store`.
+
+For browser clients, GCP config requires `wake.allowedOrigins`, a non-empty list of origins with a scheme and host but no path. Deployment joins it into the Cloud Run `WAKE_ALLOWED_ORIGINS` environment variable. Both routes answer `OPTIONS` preflights, and only an exact allow-listed request origin receives CORS access-control headers; wildcards are not accepted.
+
+This API controls lifecycle only. GCP SSH, rsync, verification, smoke, acceptance, and the post-rsync identity-manifest publish address `cloudbox-<name>` through IAP; they never pin the VM's external IP.
+
 ---
 
 ## 1. Current system: what the relay knows

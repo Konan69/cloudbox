@@ -37,6 +37,7 @@ const gcpConfig: GcpCloudboxConfig = {
     dataDiskType: "pd-ssd",
     credentials: "adc",
   },
+  wake: { allowedOrigins: ["https://app.example.test"] },
 };
 
 describe("SSH transport", () => {

@@ -51,7 +51,11 @@ node dist/cli.mjs verify-idle --timeout 1800
 
 GCP verification and smoke commands address `cloudbox-<name>` through IAP, not the external IP. Install and authenticate the `gcloud` CLI first. The deployer receives `roles/iap.tunnelResourceAccessor`, and the SSH firewall accepts TCP 22 only from Google's IAP range, `35.235.240.0/20`.
 
-`cloudbox ssh`, sync, verification, and acceptance all use `gcloud compute start-iap-tunnel` as SSH's `ProxyCommand`. The VM keeps an ephemeral external IP for egress, but that IP is not stable across suspend/resume and must never be pinned.
+`cloudbox ssh`, sync, verification, and acceptance all use `gcloud compute start-iap-tunnel` as SSH's `ProxyCommand`. Manifest publication after rsync uses that same transport. The VM keeps an ephemeral external IP for egress, but that IP is not stable across suspend/resume and must never be pinned.
+
+## Wake service status
+
+The wake service keeps lifecycle control separate from host access: `POST /wake/<name>` starts or resumes the VM, while authenticated `GET /status/<name>` is read-only. GCP config requires a non-empty `wake.allowedOrigins` list for browser CORS. When both `CLOUDBOX_WAKE_URL` and `CLOUDBOX_WAKE_SECRET` are set, `cloudbox status` prints the wake-service view after the provider view; SSH and manifest sync still use IAP by instance name.
 
 ## Autonomous T3 thread smoke
 

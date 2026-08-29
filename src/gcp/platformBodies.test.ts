@@ -116,6 +116,7 @@ describe("GCP wake platform request bodies", () => {
       zone: "europe-west2-b",
       instanceName: "cloudbox-dev",
       rateLimitBucket: "wake-rate",
+      allowedOrigins: ["https://app.example.test", "http://localhost:3000"],
       secretName: "projects/cloudbox-project/secrets/cloudbox-dev-wake",
       secretVersion: "3",
     });
@@ -136,6 +137,10 @@ describe("GCP wake platform request bodies", () => {
     expect(body.template.containers[0]?.env).toContainEqual({
       name: "RATE_LIMIT_BUCKET",
       value: "wake-rate",
+    });
+    expect(body.template.containers[0]?.env).toContainEqual({
+      name: "WAKE_ALLOWED_ORIGINS",
+      value: "https://app.example.test,http://localhost:3000",
     });
   });
 
