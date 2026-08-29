@@ -26,6 +26,39 @@ The key design choice is **shared storage, split execution**:
 * Persist both host and guest paths. Do **not** overload `worktreePath`: current code treats a non-null value as a real Git linked worktree and may recreate or remove it.
 * Make machine identity durable; treat running/stopped as reconciled operational state.
 
+## Machine identity manifest
+
+Machine mode requires a completed, non-dry-run `cloudbox sync`. Bootstrap configures the T3 server to read:
+
+```text
+T3_MACHINE_IDENTITY_MANIFEST=/home/<boxUser>/.config/cloudbox/machine-identity.json
+```
+
+Bootstrap does **not** create this user-owned file; identity arrives from the user's local machine through sync. The manifest schema is:
+
+```json
+{
+  "version": 1,
+  "mounts": [
+    {
+      "hostPath": "/home/dev/.codex",
+      "guestPath": "/home/dev/.codex",
+      "readOnly": false
+    }
+  ]
+}
+```
+
+Cloudbox derives one mount root from every `identity.paths` include. It takes the first component below `~` (`~/.codex/auth.json` becomes `~/.codex`), except `~/.config/<app>/...`, where it keeps both `.config` and the app component (`~/.config/opencode/auth.json` becomes `~/.config/opencode`). It expands `~` to `/home/<boxUser>` on both sides, deduplicates, sorts, and sets `readOnly` to `false`. Derivation is textual: local symlinks are not resolved, so a configured path such as `~/.agents/skills` remains represented through its host-side `.agents` path.
+
+After all rsync transfers succeed, `cloudbox sync` writes a temporary file in `~/.config/cloudbox`, sets mode `0600`, and atomically renames it to `machine-identity.json`. It then checks every `hostPath` with `-d`. Missing directories are listed and make sync fail as an incomplete identity push. A dry run never writes or verifies the manifest.
+
+Sync also ensures `~/.config/systemd/user/t3code-fork.service` contains the environment line and runs `systemctl --user daemon-reload` only when it changes the unit. It never restarts T3. When sync reports that the line was added or corrected, restart it explicitly on the host:
+
+```bash
+systemctl --user restart t3code-fork.service
+```
+
 A minimal contract is:
 
 ```ts

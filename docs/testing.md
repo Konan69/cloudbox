@@ -16,6 +16,24 @@ pnpm verify
 
 It runs typechecking, tests, and the static bootstrap check. It does not run Docker, install host packages, or contact a cloud provider.
 
+## Machine identity manifest
+
+The focused local tests are:
+
+```bash
+pnpm exec vitest run src/identity/manifest.test.ts src/cli.test.ts src/bootstrap/render-host.test.ts
+```
+
+They cover the version 1 manifest schema, the user-owned path `/home/<boxUser>/.config/cloudbox/machine-identity.json`, normal first-component derivation, the two-component `~/.config/<app>` exception, deduplication/sorting, and textual handling of symlinked include paths. They also check that a normal sync publishes only after all rsync transfers, `--dry-run` does not publish, the remote write uses a temporary file plus `mv`, missing host directories fail with a list, and the user unit receives `T3_MACHINE_IDENTITY_MANIFEST` plus a daemon reload without an automatic restart.
+
+Bootstrap only installs the environment reference; it does not create the manifest. Before testing machine mode on a host, complete `cloudbox sync`. If sync reports that it updated `t3code-fork.service`, run this on the host before creating a machine:
+
+```bash
+systemctl --user restart t3code-fork.service
+```
+
+A successful sync verifies that every manifest `hostPath` is an existing host directory. Treat a missing-directory failure as an incomplete identity push, not as a warning.
+
 ## Remote acceptance
 
 ```bash
