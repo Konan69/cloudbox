@@ -37,6 +37,8 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain("set -euo pipefail");
     expect(script).toContain("/var/log/cloudbox-bootstrap.log");
     expect(script).toContain("host-v2-$name.done");
+    expect(script).toContain('run_phase 05-golden-v2 "$REBUILD_GOLDEN" phase_golden');
+    expect(script).not.toContain('run_phase 05-golden "$REBUILD_GOLDEN" phase_golden');
     expect(script).toContain("run_phase 06a-t3-machine-identity-unit");
     expect(script).toContain("/dev/disk/by-id/google-agent-data");
     expect(script).toContain("zpool create");
@@ -45,6 +47,14 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain("images:ubuntu/24.04/cloud testvm --vm </dev/null");
     expect(script).toContain("security.nesting=true");
     expect(script).toContain("incus publish golden-build --alias golden");
+    expect(script).toContain('box_uid="$(id -u "$BOX_USER")"');
+    expect(script).toContain('box_gid="$(id -g "$BOX_USER")"');
+    expect(script).toContain("userdel -r ubuntu");
+    expect(script).toContain("groupdel ubuntu");
+    expect(script).toContain('groupmod -g "$HOST_GID" "$USER_NAME"');
+    expect(script).toContain('usermod -u "$HOST_UID" -g "$HOST_GID"');
+    expect(script).toContain('chown -R "$HOST_UID:$HOST_GID" "/home/$USER_NAME"');
+    expect(script).toContain('incus exec golden-build -- getent passwd ubuntu');
     expect(script).toContain("--rebuild");
     expect(script).toContain("https://github.com/example/t3code.git");
     expect(script).toContain("main");

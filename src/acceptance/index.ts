@@ -181,7 +181,7 @@ else
     02-zfs
     03-incus
     04-incus-verification
-    05-golden
+    05-golden-v2
     06-t3
     06a-t3-machine-identity-unit
     07-t3-idle-token
@@ -290,6 +290,37 @@ printf '%s' "$aliases" | jq -e 'type == "array" and any(.[]; .name == "golden")'
 printf 'alias=golden present=true\\n'`,
   );
 
+const goldenIdentityCheck = (target: SshTransport) =>
+  remoteCheck(
+    target,
+    "golden identity",
+    `container=accept-golden-identity
+host_directory=''
+cleanup() {
+  incus delete --force "$container" </dev/null >/dev/null 2>&1 || true
+  if [[ -n "$host_directory" ]]; then sudo rm -rf "$host_directory"; fi
+}
+trap cleanup EXIT
+if incus info "$container" </dev/null >/dev/null 2>&1; then incus delete --force "$container" </dev/null; fi
+box_user=dev
+host_uid="$(id -u "$box_user")"
+host_gid="$(id -g "$box_user")"
+host_directory="$(sudo -u "$box_user" mktemp -d /tmp/cloudbox-golden-identity.XXXXXX)"
+host_file="$host_directory/owned-by-box-user"
+sudo -u "$box_user" bash -c 'printf "identity-check\\n" > "$1"' _ "$host_file"
+test "$(stat -c '%u:%g' "$host_file")" = "$host_uid:$host_gid"
+incus launch golden "$container" </dev/null
+incus config device add "$container" identity-check disk "source=$host_directory" path=/mnt/cloudbox-identity shift=true </dev/null
+guest_uid="$(incus exec "$container" -- id -u "$box_user" </dev/null)"
+guest_gid="$(incus exec "$container" -- id -g "$box_user" </dev/null)"
+test "$guest_uid" = "$host_uid"
+test "$guest_gid" = "$host_gid"
+guest_owner="$(incus exec "$container" -- stat -c '%U:%G' /mnt/cloudbox-identity/owned-by-box-user </dev/null)"
+test "$guest_owner" = "$box_user:$box_user"
+printf 'host=%s:%s guest=%s:%s shifted_owner=%s\\n' "$host_uid" "$host_gid" "$guest_uid" "$guest_gid" "$guest_owner"`,
+    120_000,
+  );
+
 const t3Check = (target: SshTransport) =>
   remoteCheck(
     target,
@@ -300,7 +331,8 @@ token="$(cat /home/dev/.t3/idle-detector.token)"
 test -n "$token"
 clients="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" http://127.0.0.1:3773/api/auth/clients)"
 printf '%s' "$clients" | jq -e 'type == "array"' >/dev/null
-service_state="$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active t3code-fork.service)"
+box_uid="$(id -u dev)"
+service_state="$(XDG_RUNTIME_DIR="/run/user/$box_uid" systemctl --user is-active t3code-fork.service)"
 test "$service_state" = active
 printf 'environment=json clients=%s service=%s\\n' "$(printf '%s' "$clients" | jq 'length')" "$service_state"`,
   );
@@ -347,6 +379,7 @@ export const makeAcceptanceChecks = (
   if (expectVm) checks.push(vmCheck(target));
   checks.push(
     goldenImageCheck(target),
+    goldenIdentityCheck(target),
     t3Check(target),
     machinesCliCheck(target),
     idleTimerCheck(target),

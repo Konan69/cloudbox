@@ -20,7 +20,7 @@ The authenticated wake service controls VM lifecycle only: `POST /wake/<name>` w
 
 The script logs to `/var/log/cloudbox-bootstrap.log`. Each completed phase has a marker at `/var/lib/cloudbox/host-v2-<phase>.done`. Re-running skips completed phases. Remove one phase marker to apply a changed phase. Pass `--rebuild` to replace the `golden` image while retaining other completed phases.
 
-The phases install host tools, create `tank`, initialize Incus from preseed, test both container and KVM VM launches, publish the golden image, build T3, issue its idle-detector bearer, and install the machine CLI plus idle timer. Phase `06a-t3-machine-identity-unit` rewrites the T3 user unit with the machine identity environment variable. Its distinct marker makes an already-bootstrapped host apply the unit migration on the next bootstrap run without rerunning the completed T3 build phase.
+The phases install host tools, create `tank`, initialize Incus from preseed, test both container and KVM VM launches, publish the golden image, build T3, issue its idle-detector bearer, and install the machine CLI plus idle timer. Golden identity migration uses phase marker `host-v2-05-golden-v2.done`; its new name makes an already-bootstrapped host rebuild `golden` the next time the updated bootstrap runs. The rebuild removes only the exact `golden` image/instance and `golden-build` instance. It does not alter existing `thread-*` machines or `tank/threads`. Phase `06a-t3-machine-identity-unit` similarly rewrites the T3 user unit with the machine identity environment variable without rerunning the completed T3 build phase.
 
 T3 runs from the checked-out fork with:
 
@@ -29,6 +29,12 @@ node apps/server/dist/bin.mjs serve --host 127.0.0.1 --port 3773
 ```
 
 It uses the custom `t3code-fork.service` user unit with lingering enabled. The unit points `T3_MACHINE_IDENTITY_MANIFEST` at `/home/<boxUser>/.config/cloudbox/machine-identity.json`. Bootstrap does not create the manifest; a completed `cloudbox sync` is required before machine mode can create threads. The bootstrap never runs `t3 service install` and the migration phase does not restart an already-running T3 service.
+
+## Golden image identity
+
+The golden image's `dev` account must use the same numeric UID and GID as the host box account. The golden phase reads them from `id -u "$BOX_USER"` and `id -g "$BOX_USER"`; it never assumes a fixed value. It removes the Ubuntu cloud image's `ubuntu` account and private group, creates or migrates `dev` to those host IDs, preserves its sudo/LXD/Docker access, and recursively repairs ownership under `/home/dev` before publishing the image.
+
+This is required because thread workspaces and writable identity directories are mounted with `shift=true`. Their host numeric ownership is visible unchanged inside the container. A different guest UID/GID makes host-owned files appear to belong to another guest account and prevents `dev` from updating files such as `~/.codex/auth.json`. The phase fails before publishing unless `id -u dev` and `id -g dev` match the host and `ubuntu` is absent.
 
 ## Lane installation
 
@@ -48,4 +54,4 @@ cloudbox-machines archive <name>
 cloudbox-machines restore <name>
 ```
 
-Create names instances `thread-<thread-id>` and rejects values that cannot form a valid Incus name. Exec resolves the `dev` UID and GID inside each running machine and caches that identity; the golden image currently assigns that in-machine user UID 1000. Archives are written to `/tank/archive/<name>.tar.zst`, owned by the invoking host process UID/GID. Archive destroys the instance only after a successful export.
+Create names instances `thread-<thread-id>` and rejects values that cannot form a valid Incus name. Exec resolves the `dev` UID and GID inside each running machine and caches that identity; the golden phase assigns both IDs from the host box account. Archives are written to `/tank/archive/<name>.tar.zst`, owned by the invoking host process UID/GID. Archive destroys the instance only after a successful export.

@@ -34,7 +34,9 @@ Machine mode requires a completed, non-dry-run `cloudbox sync`. Bootstrap config
 T3_MACHINE_IDENTITY_MANIFEST=/home/<boxUser>/.config/cloudbox/machine-identity.json
 ```
 
-Bootstrap does **not** create this user-owned file; identity arrives from the user's local machine through sync. The manifest schema is:
+Bootstrap does **not** create this user-owned file; identity arrives from the user's local machine through sync. The writable identity directories and host workspace are attached with `shift=true`, which preserves their host numeric ownership inside the machine. Therefore the golden image's `dev` UID and GID must exactly match the host box user's IDs; matching the account name alone is not sufficient. Bootstrap reads the host IDs dynamically rather than assuming fixed values.
+
+The manifest schema is:
 
 ```json
 {

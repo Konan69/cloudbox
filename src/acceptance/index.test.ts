@@ -4,10 +4,12 @@ import * as NodePath from "node:path";
 
 import {
   formatVerificationReport,
+  makeAcceptanceChecks,
   privateKeyPathFromConfig,
   verificationReportJson,
   type VerificationReport,
 } from "./index.ts";
+import type { SshTransport } from "../ssh/transport.ts";
 
 const report: VerificationReport = {
   ok: false,
@@ -35,6 +37,21 @@ describe("acceptance report", () => {
     );
     expect(() => privateKeyPathFromConfig("~/.ssh/id_ed25519")).toThrow(
       "must end in .pub",
+    );
+  });
+
+  it("includes the shifted-mount golden identity check", () => {
+    const target: SshTransport = {
+      provider: "gcp",
+      host: "cloudbox-test",
+      target: "dev@cloudbox-test",
+      privateKeyPath: "/tmp/id_ed25519",
+      args: () => [],
+      rsyncRemoteShell: () => "ssh",
+    };
+
+    expect(makeAcceptanceChecks(target, false).map((check) => check.name)).toContain(
+      "golden identity",
     );
   });
 });

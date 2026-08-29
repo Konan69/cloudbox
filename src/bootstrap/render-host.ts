@@ -290,13 +290,13 @@ phase_verify_incus() {
 }
 
 phase_golden() {
-  if incus image info golden >/dev/null 2>&1; then
-    if [[ "$REBUILD_GOLDEN" != 1 ]]; then
-      echo "golden alias already exists; use --rebuild to replace it"
-      return
-    fi
-    incus image delete golden
-  fi
+  local box_uid box_gid golden_uid golden_gid
+  box_uid="$(id -u "$BOX_USER")"
+  box_gid="$(id -g "$BOX_USER")"
+
+  # Only these exact migration/build names are removed. Existing thread-* machines
+  # and tank/threads are independent of the golden image and remain untouched.
+  if incus info golden >/dev/null 2>&1; then incus delete golden --force; fi
   if incus info golden-build >/dev/null 2>&1; then incus delete golden-build --force; fi
 
   # incus launch/exec parse stdin as instance YAML when it is not a TTY; the GCE
@@ -306,9 +306,11 @@ phase_golden() {
     -c security.syscalls.intercept.mknod=true \
     -c security.syscalls.intercept.setxattr=true </dev/null
   incus exec golden-build -- cloud-init status --wait </dev/null
-  incus exec golden-build -- bash -s -- "$BOX_USER" <<'GOLDEN'
+  incus exec golden-build -- bash -s -- "$BOX_USER" "$box_uid" "$box_gid" <<'GOLDEN'
 set -euo pipefail
 USER_NAME="$1"
+HOST_UID="$2"
+HOST_GID="$3"
 export DEBIAN_FRONTEND=noninteractive
 # incusbr0 has no IPv6 egress (GCE gives none); apt otherwise picks AAAA records
 # for archive.ubuntu.com and fails with "Network is unreachable".
@@ -316,18 +318,44 @@ printf 'Acquire::ForceIPv4 "true";\n' > /etc/apt/apt.conf.d/99cloudbox-force-ipv
 apt-get update
 apt-get install -y ca-certificates curl git gh rsync jq zstd build-essential python3 procps sudo
 
-if ! id -u "$USER_NAME" >/dev/null 2>&1; then
-  uid1000_user="$(getent passwd 1000 | cut -d: -f1)"
-  if [[ -n "$uid1000_user" ]]; then
-    uid1000_group="$(id -gn "$uid1000_user")"
-    usermod --login "$USER_NAME" --home "/home/$USER_NAME" --move-home "$uid1000_user"
-    if [[ "$uid1000_group" = "$uid1000_user" ]]; then groupmod --new-name "$USER_NAME" "$uid1000_group"; fi
-    usermod --gid "$USER_NAME" "$USER_NAME"
-  else
-    useradd --create-home --uid 1000 --shell /bin/bash "$USER_NAME"
-  fi
+# The source cloud image's default account must not claim the host box user's
+# numeric identity. Derivative machines use dev as cloud-init's default user.
+if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi
+if getent group ubuntu >/dev/null 2>&1; then groupdel ubuntu; fi
+
+uid_owner="$(getent passwd "$HOST_UID" | cut -d: -f1 || true)"
+if [[ -n "$uid_owner" && "$uid_owner" != "$USER_NAME" ]]; then
+  echo "uid $HOST_UID is already owned by $uid_owner" >&2
+  exit 1
 fi
-test "$(id -u "$USER_NAME")" = 1000
+gid_owner="$(getent group "$HOST_GID" | cut -d: -f1 || true)"
+if [[ -n "$gid_owner" && "$gid_owner" != "$USER_NAME" ]]; then
+  echo "gid $HOST_GID is already owned by $gid_owner" >&2
+  exit 1
+fi
+
+if getent group "$USER_NAME" >/dev/null 2>&1; then
+  groupmod -g "$HOST_GID" "$USER_NAME"
+else
+  groupadd -g "$HOST_GID" "$USER_NAME"
+fi
+if id -u "$USER_NAME" >/dev/null 2>&1; then
+  usermod -u "$HOST_UID" -g "$HOST_GID" -d "/home/$USER_NAME" -s /bin/bash "$USER_NAME"
+else
+  useradd -m -u "$HOST_UID" -g "$HOST_GID" -d "/home/$USER_NAME" -s /bin/bash "$USER_NAME"
+fi
+install -d -m 755 -o "$HOST_UID" -g "$HOST_GID" "/home/$USER_NAME"
+chown -R "$HOST_UID:$HOST_GID" "/home/$USER_NAME"
+for supplemental_group in sudo lxd; do
+  if getent group "$supplemental_group" >/dev/null 2>&1; then
+    usermod -aG "$supplemental_group" "$USER_NAME"
+  fi
+done
+cat > /etc/cloud/cloud.cfg.d/99-cloudbox-default-user.cfg <<EOF
+system_info:
+  default_user:
+    name: $USER_NAME
+EOF
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$USER_NAME" > "/etc/sudoers.d/cloudbox-$USER_NAME"
 chmod 440 "/etc/sudoers.d/cloudbox-$USER_NAME"
 
@@ -354,11 +382,30 @@ fi
 if ! command -v docker >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; fi
 usermod -aG docker "$USER_NAME"
 systemctl enable docker
+# User-scoped installers (vite-plus today, and any future pnpm/npm tools) must
+# remain writable after a UID/GID migration.
+chown -R "$HOST_UID:$HOST_GID" "/home/$USER_NAME"
 command -v node pnpm vp git gh rsync docker lane claude codex pi opencode
 npm ls -g --depth=0
 GOLDEN
 
+  golden_uid="$(incus exec golden-build -- id -u "$BOX_USER" </dev/null)"
+  golden_gid="$(incus exec golden-build -- id -g "$BOX_USER" </dev/null)"
+  if [[ "$golden_uid" != "$box_uid" ]]; then
+    echo "golden $BOX_USER uid mismatch: expected $box_uid, got $golden_uid" >&2
+    exit 1
+  fi
+  if [[ "$golden_gid" != "$box_gid" ]]; then
+    echo "golden $BOX_USER gid mismatch: expected $box_gid, got $golden_gid" >&2
+    exit 1
+  fi
+  if incus exec golden-build -- getent passwd ubuntu </dev/null >/dev/null 2>&1; then
+    echo "golden build still contains the ubuntu user" >&2
+    exit 1
+  fi
+
   incus stop golden-build --force
+  if incus image info golden >/dev/null 2>&1; then incus image delete golden; fi
   incus publish golden-build --alias golden
   incus image info golden
   incus delete golden-build
@@ -517,7 +564,7 @@ run_phase 01-host-packages 0 phase_host_packages
 run_phase 02-zfs 0 phase_zfs
 run_phase 03-incus 0 phase_incus
 run_phase 04-incus-verification 0 phase_verify_incus
-run_phase 05-golden "$REBUILD_GOLDEN" phase_golden
+run_phase 05-golden-v2 "$REBUILD_GOLDEN" phase_golden
 run_phase 06-t3 0 phase_t3
 run_phase 06a-t3-machine-identity-unit 0 phase_t3_machine_identity_unit
 run_phase 07-t3-idle-token 0 phase_t3_idle_token
