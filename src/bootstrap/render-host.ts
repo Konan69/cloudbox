@@ -61,6 +61,19 @@ export const renderHostBootstrap = (config: HostBootstrapConfig): string => {
 
   return String.raw`#!/usr/bin/env bash
 set -euo pipefail
+resolve_vp() {
+  # vite-plus installs to ~/.local/share/vite-plus/bin (older builds used ~/.vite-plus) and only
+  # adds itself to the user's interactive rc, so a login shell may not see it: try PATH first,
+  # then the known locations.
+  local user="$1" home found
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  found="$(sudo -iu "$user" bash -lc 'command -v vp' 2>/dev/null || true)"
+  for candidate in "$found" "$home/.local/share/vite-plus/bin/vp" "$home/.vite-plus/bin/vp"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  echo "vp was not found for $user after install" >&2
+  return 1
+}
 umask 027
 mkdir -p /var/log /var/lib/cloudbox
 exec > >(tee -a /var/log/cloudbox-bootstrap.log) 2>&1
@@ -177,8 +190,7 @@ UNIT
   if ! sudo -iu "$BOX_USER" bash -lc 'command -v vp' >/dev/null 2>&1; then
     sudo -iu "$BOX_USER" bash -lc 'curl -fsSL https://vite.plus | bash'
   fi
-  vp_bin="$(sudo -iu "$BOX_USER" bash -lc 'command -v vp')"
-  test -x "$vp_bin"
+  vp_bin="$(resolve_vp "$BOX_USER")"
   ln -sfn "$vp_bin" /usr/local/bin/vp
   sudo -iu "$BOX_USER" bash -lc 'vp --version'
   test -c /dev/kvm
@@ -367,8 +379,20 @@ corepack prepare pnpm@11.10.0 --activate
 npm install --global ${HOST_AGENT_PACKAGES.join(" ")}
 
 sudo -iu "$USER_NAME" bash -lc 'curl -fsSL https://vite.plus | bash'
-vp_bin="$(sudo -iu "$USER_NAME" bash -lc 'command -v vp')"
-test -x "$vp_bin"
+resolve_vp() {
+  # vite-plus installs to ~/.local/share/vite-plus/bin (older builds used ~/.vite-plus) and only
+  # adds itself to the user's interactive rc, so a login shell may not see it: try PATH first,
+  # then the known locations.
+  local user="$1" home found
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  found="$(sudo -iu "$user" bash -lc 'command -v vp' 2>/dev/null || true)"
+  for candidate in "$found" "$home/.local/share/vite-plus/bin/vp" "$home/.vite-plus/bin/vp"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  echo "vp was not found for $user after install" >&2
+  return 1
+}
+vp_bin="$(resolve_vp "$USER_NAME")"
 ln -sfn "$vp_bin" /usr/local/bin/vp
 
 # lane publishes Linux x86_64 releases through its official installer.
