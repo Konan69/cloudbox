@@ -28,6 +28,12 @@ import {
 import type { CloudboxConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
+  deriveMachineIdentityManifest,
+  machineIdentityManifestPath,
+  renderMachineIdentityManifest,
+  type MachineIdentityManifest,
+} from "./identity/manifest.ts";
+import {
   isRunningState,
   makeProviderLifecycle,
   type ProviderInstance,
@@ -117,11 +123,15 @@ export type RsyncRunner = (
   args: ReadonlyArray<string>,
 ) => Effect.Effect<ProcessOutput, CloudboxCliError>;
 
-const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
+const runCapturedProcess = (
+  command: string,
+  args: ReadonlyArray<string>,
+  input?: string,
+) =>
   Effect.callback<ProcessOutput, CloudboxCliError>((resume) => {
     const child = spawn(command, [...args], {
       env: { ...process.env, LC_ALL: "C" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let settled = false;
     let stdout = "";
@@ -135,6 +145,14 @@ const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
       child.kill();
       complete(Effect.fail(cliError(command, `Could not capture ${command} output`)));
       return;
+    }
+    if (input !== undefined) {
+      if (child.stdin === null) {
+        child.kill();
+        complete(Effect.fail(cliError(command, `Could not write ${command} input`)));
+        return;
+      }
+      child.stdin.end(input);
     }
     child.stdout.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
@@ -150,14 +168,23 @@ const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
       complete(Effect.fail(cliError(command, `Could not start ${command}`, cause))),
     );
     child.once("close", (code, signal) => {
+      const stderrDetail = stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`;
       if (code === 0) {
         complete(Effect.succeed({ stdout, stderr }));
       } else if (code !== null) {
-        complete(Effect.fail(cliError(command, `${command} exited with status ${String(code)}`)));
+        complete(
+          Effect.fail(
+            cliError(command, `${command} exited with status ${String(code)}${stderrDetail}`),
+          ),
+        );
       } else if (signal !== null) {
-        complete(Effect.fail(cliError(command, `${command} terminated by signal ${signal}`)));
+        complete(
+          Effect.fail(cliError(command, `${command} terminated by signal ${signal}${stderrDetail}`)),
+        );
       } else {
-        complete(Effect.fail(cliError(command, `${command} terminated without an exit status`)));
+        complete(
+          Effect.fail(cliError(command, `${command} terminated without an exit status${stderrDetail}`)),
+        );
       }
     });
   });
@@ -410,7 +437,83 @@ export interface IdentitySyncInput {
   readonly force: boolean;
 }
 
-export const runIdentitySync = (input: IdentitySyncInput, runner: RsyncRunner) => {
+export interface IdentityManifestPublishInput {
+  readonly manifest: MachineIdentityManifest;
+  readonly boxUser: string;
+  readonly publicIp: string;
+}
+
+export type IdentityManifestPublisher = (
+  input: IdentityManifestPublishInput,
+) => Effect.Effect<void, CloudboxCliError>;
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+export const buildIdentityManifestPublishScript = (
+  manifest: MachineIdentityManifest,
+  boxUser: string,
+): string => {
+  const manifestPath = machineIdentityManifestPath(boxUser);
+  const manifestDirectory = NodePath.posix.dirname(manifestPath);
+  const unitPath = `/home/${boxUser}/.config/systemd/user/t3code-fork.service`;
+  const environmentLine = `Environment=T3_MACHINE_IDENTITY_MANIFEST=${manifestPath}`;
+  const encodedManifest = Buffer.from(
+    renderMachineIdentityManifest(manifest),
+    "utf8",
+  ).toString("base64");
+
+  return String.raw`#!/usr/bin/env bash
+set -euo pipefail
+readonly MANIFEST_PATH=${shellQuote(manifestPath)}
+readonly MANIFEST_DIRECTORY=${shellQuote(manifestDirectory)}
+readonly UNIT_PATH=${shellQuote(unitPath)}
+readonly ENVIRONMENT_LINE=${shellQuote(environmentLine)}
+
+install -d -m 700 "$MANIFEST_DIRECTORY"
+temporary="$(mktemp "$MANIFEST_DIRECTORY/.machine-identity.XXXXXX")"
+cleanup() {
+  if [[ -n "$temporary" ]]; then rm -f "$temporary"; fi
+}
+trap cleanup EXIT
+printf '%s' '${encodedManifest}' | base64 --decode > "$temporary"
+chmod 600 "$temporary"
+mv "$temporary" "$MANIFEST_PATH"
+temporary=''
+
+missing=()
+while IFS= read -r host_path; do
+  if [[ ! -d "$host_path" ]]; then missing+=("$host_path"); fi
+done < <(jq -r '.mounts[] | .hostPath' "$MANIFEST_PATH")
+if (( ${"$"}{#missing[@]} > 0 )); then
+  printf 'Machine identity mount directories are missing after sync:\n' >&2
+  printf '  %s\n' "${"$"}{missing[@]}" >&2
+  printf 'Identity sync is incomplete.\n' >&2
+  exit 1
+fi
+
+test -f "$UNIT_PATH" || {
+  printf 'Cannot update missing T3 user unit: %s\n' "$UNIT_PATH" >&2
+  exit 1
+}
+grep -Fqx '[Service]' "$UNIT_PATH" || {
+  printf 'T3 user unit has no [Service] section: %s\n' "$UNIT_PATH" >&2
+  exit 1
+}
+manifest_line_count="$(grep -c '^Environment=T3_MACHINE_IDENTITY_MANIFEST=' "$UNIT_PATH" || true)"
+if [[ "$manifest_line_count" != 1 ]] || ! grep -Fqx "$ENVIRONMENT_LINE" "$UNIT_PATH"; then
+  sed -i '/^Environment=T3_MACHINE_IDENTITY_MANIFEST=/d' "$UNIT_PATH"
+  sed -i "/^\\[Service\\]$/a $ENVIRONMENT_LINE" "$UNIT_PATH"
+  XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user daemon-reload
+  printf 'Updated t3code-fork.service with T3_MACHINE_IDENTITY_MANIFEST. Restart required: systemctl --user restart t3code-fork.service\n'
+fi
+`;
+};
+
+export const runIdentitySync = (
+  input: IdentitySyncInput,
+  runner: RsyncRunner,
+  publishManifest: IdentityManifestPublisher,
+) => {
   const runPass = (dryRun: boolean, prefix: string) =>
     Effect.forEach(input.paths, (path) =>
       runner(
@@ -440,10 +543,35 @@ export const runIdentitySync = (input: IdentitySyncInput, runner: RsyncRunner) =
     const preflight = yield* runPass(true, "Preflight");
     yield* enforceTransferLimit(preflight, input.maxTransferMb, input.force);
     yield* runPass(false, "Transferred");
+    yield* publishManifest({
+      manifest: deriveMachineIdentityManifest(input.paths, input.boxUser),
+      boxUser: input.boxUser,
+      publicIp: input.publicIp,
+    });
   });
 };
 
 const liveRsyncRunner: RsyncRunner = (_path, args) => runCapturedProcess("rsync", args);
+
+const liveIdentityManifestPublisher: IdentityManifestPublisher = ({
+  manifest,
+  boxUser,
+  publicIp,
+}) =>
+  runCapturedProcess(
+    "ssh",
+    [`${boxUser}@${publicIp}`, "bash", "-s"],
+    buildIdentityManifestPublishScript(manifest, boxUser),
+  ).pipe(
+    Effect.mapError((cause) =>
+      cliError(
+        "machine identity manifest",
+        `Failed to publish machine identity manifest: ${cause.message}`,
+        cause,
+      ),
+    ),
+    Effect.map(() => undefined),
+  );
 
 const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag }).pipe(
   Command.withDescription("Rsync configured identity paths to the running box."),
@@ -463,6 +591,7 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
             force,
           },
           liveRsyncRunner,
+          liveIdentityManifestPublisher,
         );
       }),
     ),

@@ -37,6 +37,7 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain("set -euo pipefail");
     expect(script).toContain("/var/log/cloudbox-bootstrap.log");
     expect(script).toContain("host-v2-$name.done");
+    expect(script).toContain("run_phase 06a-t3-machine-identity-unit");
     expect(script).toContain("/dev/disk/by-id/google-agent-data");
     expect(script).toContain("zpool create");
     expect(script).toContain("source: tank/incus");
@@ -49,6 +50,12 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain("main");
     expect(script).toContain("apps/server/dist/bin.mjs serve");
     expect(script).toContain("--host 127.0.0.1 --port 3773");
+    expect(script).toContain(
+      "Environment=T3_MACHINE_IDENTITY_MANIFEST=/home/dev/.config/cloudbox/machine-identity.json",
+    );
+    expect(script).not.toContain(
+      'cat > "/home/$BOX_USER/.config/cloudbox/machine-identity.json"',
+    );
     expect(script).toContain("--label idle-detector");
     const encodedConfig = /printf '%s' '([^']+)' \| base64 --decode > \/etc\/cloudbox\/config\.json/.exec(
       script,

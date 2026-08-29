@@ -1,14 +1,18 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { spawnSync } from "node:child_process";
 
 import {
+  buildIdentityManifestPublishScript,
   buildRsyncArgs,
   CloudboxCliError,
   requestWakeViaService,
   runIdentitySync,
+  type IdentityManifestPublisher,
   type IdentitySyncInput,
   type RsyncRunner,
 } from "./cli.ts";
+import { deriveMachineIdentityManifest } from "./identity/manifest.ts";
 
 const statsOutput = (files: number, bytes: number) => `
 Number of regular files transferred: ${String(files)}
@@ -25,6 +29,8 @@ const syncInput: IdentitySyncInput = {
   dryRun: false,
   force: false,
 };
+
+const noOpPublisher: IdentityManifestPublisher = () => Effect.void;
 
 describe("cloudbox wake --via-service", () => {
   it.effect("posts the configured bearer secret to the named wake endpoint", () =>
@@ -93,7 +99,9 @@ describe("cloudbox sync", () => {
           return { stdout: statsOutput(2, 700_000), stderr: "" };
         });
 
-      const error = yield* runIdentitySync(syncInput, runner).pipe(Effect.flip);
+      const error = yield* runIdentitySync(syncInput, runner, noOpPublisher).pipe(
+        Effect.flip,
+      );
 
       expect(error).toBeInstanceOf(CloudboxCliError);
       expect(error.message).toContain("1400000 bytes");
@@ -113,28 +121,75 @@ describe("cloudbox sync", () => {
           new CloudboxCliError({ operation: "rsync", message: "rsync exited with status 23" }),
         );
 
-      const error = yield* runIdentitySync({ ...syncInput, dryRun: true }, runner).pipe(
-        Effect.flip,
-      );
+      const error = yield* runIdentitySync(
+        { ...syncInput, dryRun: true },
+        runner,
+        noOpPublisher,
+      ).pipe(Effect.flip);
 
       expect(error.message).toContain("rsync failed for ~/.claude/skills/");
     }),
   );
 
-  it.effect("lets --force continue from fake dry runs to the real transfer", () =>
+  it.effect("lets --force transfer, then publishes the manifest", () =>
     Effect.gen(function* () {
+      const events: Array<string> = [];
       const calls: Array<ReadonlyArray<string>> = [];
       const runner: RsyncRunner = (_path, args) =>
         Effect.sync(() => {
           calls.push(args);
+          events.push(args.includes("--dry-run") ? "preflight" : "transfer");
           return { stdout: statsOutput(1, 700_000), stderr: "" };
         });
+      const publisher: IdentityManifestPublisher = (input) =>
+        Effect.sync(() => {
+          events.push("publish");
+          expect(input.manifest).toEqual(
+            deriveMachineIdentityManifest(syncInput.paths, syncInput.boxUser),
+          );
+          expect(input.publicIp).toBe(syncInput.publicIp);
+        });
 
-      yield* runIdentitySync({ ...syncInput, force: true }, runner);
+      yield* runIdentitySync({ ...syncInput, force: true }, runner, publisher);
 
       expect(calls).toHaveLength(4);
       expect(calls.slice(0, 2).every((args) => args.includes("--dry-run"))).toBe(true);
       expect(calls.slice(2).every((args) => !args.includes("--dry-run"))).toBe(true);
+      expect(events).toEqual(["preflight", "preflight", "transfer", "transfer", "publish"]);
     }),
   );
+
+  it.effect("does not publish the manifest during --dry-run", () =>
+    Effect.gen(function* () {
+      let publishes = 0;
+      const runner: RsyncRunner = () =>
+        Effect.succeed({ stdout: statsOutput(0, 0), stderr: "" });
+      const publisher: IdentityManifestPublisher = () =>
+        Effect.sync(() => {
+          publishes += 1;
+        });
+
+      yield* runIdentitySync({ ...syncInput, dryRun: true }, runner, publisher);
+
+      expect(publishes).toBe(0);
+    }),
+  );
+
+  it("renders an atomic host publish, verification, and user-unit migration script", () => {
+    const script = buildIdentityManifestPublishScript(
+      deriveMachineIdentityManifest(syncInput.paths, syncInput.boxUser),
+      syncInput.boxUser,
+    );
+
+    expect(script).toContain("mktemp \"$MANIFEST_DIRECTORY/.machine-identity.XXXXXX\"");
+    expect(script).toContain('mv "$temporary" "$MANIFEST_PATH"');
+    expect(script).toContain("Machine identity mount directories are missing after sync");
+    expect(script).toContain(
+      "Environment=T3_MACHINE_IDENTITY_MANIFEST=/home/dev/.config/cloudbox/machine-identity.json",
+    );
+    expect(script).toContain("systemctl --user daemon-reload");
+    expect(script).not.toMatch(/^\s*systemctl --user restart/mu);
+    const syntax = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
+    expect(syntax.status, syntax.stderr).toBe(0);
+  });
 });

@@ -364,6 +364,37 @@ GOLDEN
   incus delete golden-build
 }
 
+write_t3_unit() {
+  install -d -m 700 -o "$BOX_USER" -g "$BOX_USER" "/home/$BOX_USER/.config/systemd/user"
+  cat > "/home/$BOX_USER/.config/systemd/user/t3code-fork.service" <<'UNIT'
+[Unit]
+Description=T3 Code patched fork
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/${config.boxUser}
+Environment=T3CODE_HOME=/home/${config.boxUser}/.t3
+Environment=T3_MACHINE_IDENTITY_MANIFEST=/home/${config.boxUser}/.config/cloudbox/machine-identity.json
+Environment=T3CODE_RELAY_URL=${config.t3.relayUrl}
+Environment=T3CODE_CLERK_PUBLISHABLE_KEY=${config.t3.clerkPublishableKey}
+Environment=T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=${config.t3.clerkCliOauthClientId}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node /home/${config.boxUser}/t3code/apps/server/dist/bin.mjs serve --base-dir /home/${config.boxUser}/.t3 --host 127.0.0.1 --port ${String(config.t3Port)} /home/${config.boxUser}
+KillMode=mixed
+OOMPolicy=continue
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+  chown "$BOX_USER:$BOX_USER" "/home/$BOX_USER/.config/systemd/user/t3code-fork.service"
+}
+
 phase_t3() {
   if [[ ! -d "/home/$BOX_USER/t3code/.git" ]]; then
     sudo -u "$BOX_USER" git clone --branch ${shellQuote(config.t3.branch)} --single-branch ${shellQuote(config.t3.repoUrl)} "/home/$BOX_USER/t3code"
@@ -394,39 +425,30 @@ phase_t3() {
     exit 1
   fi
 
-  install -d -m 700 -o "$BOX_USER" -g "$BOX_USER" "/home/$BOX_USER/.config/systemd/user"
-  cat > "/home/$BOX_USER/.config/systemd/user/t3code-fork.service" <<'UNIT'
-[Unit]
-Description=T3 Code patched fork
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-Type=simple
-WorkingDirectory=/home/${config.boxUser}
-Environment=T3CODE_HOME=/home/${config.boxUser}/.t3
-Environment=T3CODE_RELAY_URL=${config.t3.relayUrl}
-Environment=T3CODE_CLERK_PUBLISHABLE_KEY=${config.t3.clerkPublishableKey}
-Environment=T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=${config.t3.clerkCliOauthClientId}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/node /home/${config.boxUser}/t3code/apps/server/dist/bin.mjs serve --base-dir /home/${config.boxUser}/.t3 --host 127.0.0.1 --port ${String(config.t3Port)} /home/${config.boxUser}
-KillMode=mixed
-OOMPolicy=continue
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-UNIT
-  chown "$BOX_USER:$BOX_USER" "/home/$BOX_USER/.config/systemd/user/t3code-fork.service"
+  write_t3_unit
   loginctl enable-linger "$BOX_USER"
   local box_uid
   box_uid="$(id -u "$BOX_USER")"
   systemctl start "user@$box_uid.service"
   runuser -u "$BOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$box_uid" systemctl --user daemon-reload
   runuser -u "$BOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$box_uid" systemctl --user enable --now t3code-fork.service
+}
+
+phase_t3_machine_identity_unit() {
+  local unit_path="/home/$BOX_USER/.config/systemd/user/t3code-fork.service"
+  local environment_line="Environment=T3_MACHINE_IDENTITY_MANIFEST=/home/$BOX_USER/.config/cloudbox/machine-identity.json"
+  local already_configured=0
+  if [[ -f "$unit_path" ]] && grep -Fqx "$environment_line" "$unit_path"; then
+    already_configured=1
+  fi
+
+  write_t3_unit
+  local box_uid
+  box_uid="$(id -u "$BOX_USER")"
+  runuser -u "$BOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$box_uid" systemctl --user daemon-reload
+  if [[ "$already_configured" != 1 ]]; then
+    echo "t3code-fork.service now references the machine identity manifest; restart required: systemctl --user restart t3code-fork.service"
+  fi
 }
 
 phase_t3_idle_token() {
@@ -497,6 +519,7 @@ run_phase 03-incus 0 phase_incus
 run_phase 04-incus-verification 0 phase_verify_incus
 run_phase 05-golden "$REBUILD_GOLDEN" phase_golden
 run_phase 06-t3 0 phase_t3
+run_phase 06a-t3-machine-identity-unit 0 phase_t3_machine_identity_unit
 run_phase 07-t3-idle-token 0 phase_t3_idle_token
 run_phase 08-cloudbox-tools 0 phase_cloudbox_tools
 

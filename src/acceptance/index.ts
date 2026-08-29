@@ -205,13 +205,14 @@ else
     04-incus-verification
     05-golden
     06-t3
+    06a-t3-machine-identity-unit
     07-t3-idle-token
     08-cloudbox-tools
   )
   for phase_name in "\${phases[@]}"; do
     sudo test -f "/var/lib/cloudbox/host-v2-$phase_name.done"
   done
-  marker_evidence='markers=host-v2:8/8'
+  marker_evidence='markers=host-v2:9/9'
 fi
 sudo test -f /var/log/cloudbox-bootstrap.log
 if sudo grep -nE '(^|[^[:alnum:]_])ERROR([^[:alnum:]_]|$)' /var/log/cloudbox-bootstrap.log; then

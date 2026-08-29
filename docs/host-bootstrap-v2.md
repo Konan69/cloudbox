@@ -12,7 +12,7 @@ The renderer does not contact GCP. Alchemy uploads the rendered inner script plu
 
 The script logs to `/var/log/cloudbox-bootstrap.log`. Each completed phase has a marker at `/var/lib/cloudbox/host-v2-<phase>.done`. Re-running skips completed phases. Remove one phase marker to apply a changed phase. Pass `--rebuild` to replace the `golden` image while retaining other completed phases.
 
-The phases install host tools, create `tank`, initialize Incus from preseed, test both container and KVM VM launches, publish the golden image, build T3, issue its idle-detector bearer, and install the machine CLI plus idle timer.
+The phases install host tools, create `tank`, initialize Incus from preseed, test both container and KVM VM launches, publish the golden image, build T3, issue its idle-detector bearer, and install the machine CLI plus idle timer. Phase `06a-t3-machine-identity-unit` rewrites the T3 user unit with the machine identity environment variable. Its distinct marker makes an already-bootstrapped host apply the unit migration on the next bootstrap run without rerunning the completed T3 build phase.
 
 T3 runs from the checked-out fork with:
 
@@ -20,7 +20,7 @@ T3 runs from the checked-out fork with:
 node apps/server/dist/bin.mjs serve --host 127.0.0.1 --port 3773
 ```
 
-It uses the custom `t3code-fork.service` user unit with lingering enabled. The bootstrap never runs `t3 service install`.
+It uses the custom `t3code-fork.service` user unit with lingering enabled. The unit points `T3_MACHINE_IDENTITY_MANIFEST` at `/home/<boxUser>/.config/cloudbox/machine-identity.json`. Bootstrap does not create the manifest; a completed `cloudbox sync` is required before machine mode can create threads. The bootstrap never runs `t3 service install` and the migration phase does not restart an already-running T3 service.
 
 ## Lane installation
 
