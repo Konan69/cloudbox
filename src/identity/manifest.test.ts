@@ -51,8 +51,8 @@ describe("machine identity manifest", () => {
           readOnly: false,
         },
         {
-          hostPath: "/home/dev/.local",
-          guestPath: "/home/dev/.local",
+          hostPath: "/home/dev/.local/share/opencode",
+          guestPath: "/home/dev/.local/share/opencode",
           readOnly: false,
         },
         {

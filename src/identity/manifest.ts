@@ -14,7 +14,14 @@ export const machineIdentityManifestPath = (boxUser: string): string =>
 
 const mountRoot = (path: string): string => {
   const components = path.slice(2).split("/").filter((component) => component.length > 0);
-  const componentCount = components[0] === ".config" && components.length > 1 ? 2 : 1;
+  // Per-app roots stay per-app: ~/.config/<app> and ~/.local/share/<app> are mounted
+  // individually so the host's whole ~/.config or ~/.local never shadows the guest's own.
+  const componentCount =
+    components[0] === ".local" && components[1] === "share" && components.length > 2
+      ? 3
+      : components[0] === ".config" && components.length > 1
+        ? 2
+        : 1;
   return components.slice(0, componentCount).join("/");
 };
 
