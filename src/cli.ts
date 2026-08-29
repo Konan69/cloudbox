@@ -25,6 +25,11 @@ import {
   makeSshThreadSmokeTransport,
   runThreadSmokeSuite,
 } from "./acceptance/threadSmoke.ts";
+import {
+  BootstrapCloneError,
+  runBootstrapClone,
+  type BootstrapCloneRunner,
+} from "./bootstrap/clone.ts";
 import type { CloudboxConfig, RepoConfig } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -441,6 +446,11 @@ const forceFlag = Flag.boolean("force").pipe(
   Flag.withDescription("Transfer even when the dry-run total exceeds identity.maxTransferMb."),
 );
 
+const bootstrapForceFlag = Flag.boolean("force").pipe(
+  Flag.withDefault(false),
+  Flag.withDescription("Transfer even when a leg exceeds bootstrap.maxTransferMb."),
+);
+
 const withTrailingSlash = (path: string): string =>
   path.endsWith("/") ? path : `${path}/`;
 
@@ -662,6 +672,18 @@ export const runIdentitySync = (
 
 const liveRsyncRunner: RsyncRunner = (_path, args) => runCapturedProcess("rsync", args);
 
+const liveBootstrapCloneRunner: BootstrapCloneRunner = (leg, path, args) =>
+  runCapturedProcess("rsync", args).pipe(
+    Effect.mapError(
+      (cause) =>
+        new BootstrapCloneError({
+          operation: `bootstrap ${leg}`,
+          message: `rsync failed for ${path}: ${cause.message}`,
+          cause,
+        }),
+    ),
+  );
+
 const liveIdentityManifestPublisher: IdentityManifestPublisher = ({
   manifest,
   boxUser,
@@ -840,6 +862,165 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
   ),
 );
 
+const fromConfigFlag = Flag.string("from-config").pipe(
+  Flag.withDescription("Source Cloudbox config. The current cloudbox.json is the destination."),
+);
+
+const cacheDirFlag = Flag.string("cache-dir").pipe(
+  Flag.withDefault(""),
+  Flag.withDescription(
+    "Persistent local cache for resumable deltas (default: ~/.cache/cloudbox/bootstrap/<source>-to-<destination>).",
+  ),
+);
+
+const bootstrapCacheSegment = (value: string): string =>
+  value.replaceAll(/[^A-Za-z0-9._-]+/gu, "-").replaceAll(/^-+|-+$/gu, "") || "box";
+
+const bootstrapCacheIdentity = (config: CloudboxConfig): string =>
+  bootstrapCacheSegment(
+    config.provider === "aws"
+      ? `aws-${config.region}-${config.name}`
+      : `gcp-${config.gcp.project}-${config.gcp.zone}-${config.name}`,
+  );
+
+const resolveLocalPath = (path: string): string =>
+  path === "~" || path.startsWith("~/")
+    ? NodePath.join(NodeOs.homedir(), path.slice(2))
+    : NodePath.resolve(path);
+
+const bootstrapConfig = (config: CloudboxConfig, configPath: string) => {
+  if (config.bootstrap !== undefined && config.bootstrap.paths.length > 0) {
+    return Effect.succeed(config.bootstrap);
+  }
+  return Effect.fail(
+    cliError(
+      "bootstrap clone",
+      `${configPath} must declare at least one bootstrap.paths entry before it can ${configPath === "cloudbox.json" ? "receive" : "send"} a bootstrap clone.`,
+    ),
+  );
+};
+
+const runningTransport = (config: CloudboxConfig) =>
+  Effect.gen(function* () {
+    yield* checkSshPrerequisites(config);
+    const instance = yield* makeProviderLifecycle(config).wake;
+    const host = config.provider === "aws" ? yield* requirePublicIp(instance) : undefined;
+    const transport = yield* makeSshTransport(config, host);
+    yield* waitForSsh(transport);
+    return transport;
+  });
+
+const bootstrapCloneCommand = Command.make("bootstrap-clone", {
+  fromConfig: fromConfigFlag,
+  cacheDir: cacheDirFlag,
+  dryRun: dryRunFlag,
+  force: bootstrapForceFlag,
+}).pipe(
+  Command.withDescription(
+    "Clone allowlisted bootstrap paths from an existing box through a resumable local rsync cache.",
+  ),
+  Command.withHandler(({ cacheDir, dryRun, force, fromConfig }) =>
+    Effect.gen(function* () {
+      const sourceConfig = yield* loadConfig(fromConfig);
+      const destinationConfig = yield* loadConfig("cloudbox.json");
+      const sourceBootstrap = yield* bootstrapConfig(sourceConfig, fromConfig);
+      const destinationBootstrap = yield* bootstrapConfig(destinationConfig, "cloudbox.json");
+      const missingPaths = destinationBootstrap.paths.filter(
+        (path) => !sourceBootstrap.paths.includes(path),
+      );
+      if (missingPaths.length > 0) {
+        return yield* Effect.fail(
+          cliError(
+            "bootstrap clone",
+            `Destination bootstrap paths are not allowlisted by ${fromConfig}:\n${missingPaths.map((path) => `  ${path}`).join("\n")}`,
+          ),
+        );
+      }
+      const sameBox =
+        sourceConfig.provider === destinationConfig.provider &&
+        sourceConfig.name === destinationConfig.name &&
+        (sourceConfig.provider === "aws"
+          ? destinationConfig.provider === "aws" && sourceConfig.region === destinationConfig.region
+          : destinationConfig.provider === "gcp" &&
+            sourceConfig.gcp.project === destinationConfig.gcp.project &&
+            sourceConfig.gcp.zone === destinationConfig.gcp.zone);
+      if (sameBox) {
+        return yield* Effect.fail(
+          cliError("bootstrap clone", "Source and destination resolve to the same Cloudbox."),
+        );
+      }
+
+      const defaultCacheRoot = NodePath.join(
+        NodeOs.homedir(),
+        ".cache",
+        "cloudbox",
+        "bootstrap",
+        `${bootstrapCacheIdentity(sourceConfig)}-to-${bootstrapCacheIdentity(destinationConfig)}`,
+      );
+      const cacheRoot = cacheDir.length === 0 ? defaultCacheRoot : resolveLocalPath(cacheDir);
+      const source = yield* runningTransport(sourceConfig);
+      if (!dryRun) {
+        const fs = yield* FileSystem.FileSystem;
+        const cacheExists = yield* fs.exists(cacheRoot).pipe(
+          Effect.mapError((cause) =>
+            cliError("bootstrap clone", `Could not inspect bootstrap cache ${cacheRoot}`, cause),
+          ),
+        );
+        if (cacheExists) {
+          const cacheInfo = yield* fs.stat(cacheRoot).pipe(
+            Effect.mapError((cause) =>
+              cliError("bootstrap clone", `Could not inspect bootstrap cache ${cacheRoot}`, cause),
+            ),
+          );
+          if (cacheInfo.type !== "Directory" || (cacheInfo.mode & 0o077) !== 0) {
+            return yield* Effect.fail(
+              cliError(
+                "bootstrap clone",
+                `Bootstrap cache must be a private directory (mode 0700): ${cacheRoot}`,
+              ),
+            );
+          }
+        } else {
+          yield* fs.makeDirectory(cacheRoot, { recursive: true, mode: 0o700 }).pipe(
+            Effect.mapError((cause) =>
+              cliError("bootstrap clone", `Could not create bootstrap cache ${cacheRoot}`, cause),
+            ),
+          );
+        }
+      }
+      const destination = dryRun ? source : yield* runningTransport(destinationConfig);
+      yield* Console.log(
+        dryRun
+          ? `Previewing source deltas into ${cacheRoot}; the destination is not contacted.`
+          : `Cloning through resumable cache ${cacheRoot}. Existing destination-only files are kept.`,
+      );
+      yield* runBootstrapClone(
+        {
+          paths: destinationBootstrap.paths,
+          excludes: [...new Set([...sourceBootstrap.excludes, ...destinationBootstrap.excludes])],
+          maxTransferMb: Math.min(
+            sourceBootstrap.maxTransferMb,
+            destinationBootstrap.maxTransferMb,
+          ),
+          cacheRoot,
+          source,
+          destination,
+          dryRun,
+          force,
+        },
+        liveBootstrapCloneRunner,
+      ).pipe(
+        Effect.mapError((cause) => cliError("bootstrap clone", cause.message, cause)),
+      );
+      yield* Console.log(
+        dryRun
+          ? "Source preview complete. Run without --dry-run to refresh the cache and preview the destination delta."
+          : "Bootstrap clone complete. The cache is retained for fast resumable reruns.",
+      );
+    }),
+  ),
+);
+
 const sshCommand = Command.make("ssh").pipe(
   Command.withDescription("Open an interactive SSH session to the running box."),
   Command.withHandler(() =>
@@ -984,6 +1165,7 @@ export const cloudbox = Command.make("cloudbox").pipe(
     wakeCommand,
     sleepCommand,
     syncCommand,
+    bootstrapCloneCommand,
     sshCommand,
     verifyCommand,
     smokeThreadCommand,

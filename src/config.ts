@@ -142,6 +142,32 @@ export const IdentityConfig = Schema.Struct({
   maxTransferMb: PositiveInteger,
 });
 
+export const BootstrapPath = Schema.String.pipe(
+  Schema.refine(
+    (value): value is string => {
+      if (!value.startsWith("~/") || !hasNoControlCharacters(value)) return false;
+      const components = value.slice(2).split("/");
+      const pathComponents = value.endsWith("/") ? components.slice(0, -1) : components;
+      return (
+        pathComponents.length > 0 &&
+        pathComponents.every(
+          (component) => component.length > 0 && component !== "." && component !== "..",
+        )
+      );
+    },
+    {
+      identifier: "BootstrapPath",
+      description: "a bootstrap path under the box user home, starting with ~/",
+    },
+  ),
+);
+
+export const BootstrapConfig = Schema.Struct({
+  paths: Schema.Array(BootstrapPath),
+  excludes: Schema.Array(Schema.NonEmptyString),
+  maxTransferMb: PositiveInteger,
+});
+
 export const GcpCredentials = Schema.Union([
   Schema.Literal("adc"),
   Schema.Struct({ serviceAccountJsonPath: Schema.NonEmptyString }),
@@ -203,6 +229,7 @@ const SharedConfig = {
   idleMinutes: PositiveInteger,
   t3: T3Config,
   identity: IdentityConfig,
+  bootstrap: Schema.optionalKey(BootstrapConfig),
   repos: ReposConfig,
   boxUser: Schema.Literal("dev"),
 } as const;
@@ -227,6 +254,7 @@ export const GcpCloudboxConfig = Schema.Struct({
 export const CloudboxConfig = Schema.Union([AwsCloudboxConfig, GcpCloudboxConfig]);
 
 export type RepoConfig = typeof RepoConfig.Type;
+export type BootstrapConfig = typeof BootstrapConfig.Type;
 export type GcpCredentials = typeof GcpCredentials.Type;
 export type GcpHostConfig = typeof GcpConfig.Type;
 export type AwsCloudboxConfig = typeof AwsCloudboxConfig.Type;

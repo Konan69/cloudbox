@@ -89,7 +89,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`:
+Every field for the selected provider is required. There are no provider defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`. The optional `bootstrap` block allowlists paths that this box may send or receive during a box-to-box bootstrap:
 
 ```json
 {
@@ -97,6 +97,11 @@ Every field for the selected provider is required. There are no config defaults.
     "repoUrl": "https://github.com/example/t3code.git",
     "branch": "main",
     "settingsParity": { "enabled": true, "keybindings": true }
+  },
+  "bootstrap": {
+    "paths": ["~/.agents/skills/", "~/.config/gh/", "~/.gitconfig", "~/src/"],
+    "excludes": ["node_modules/", ".cache/"],
+    "maxTransferMb": 2000
   },
   "repos": [
     {
@@ -123,6 +128,19 @@ Every real sync first runs rsync in dry-run mode and totals `Total transferred f
 Credentials are copied only when explicitly listed in `identity.paths`. This includes `~/.codex/auth.json`, `~/.claude/.credentials.json`, and `~/.config/gh/hosts.yml`. The safer alternative is to omit those files and run `codex login`, `claude auth login`, and `gh auth login` once on the box.
 
 A real sync then clones missing configured repositories or runs only `git fetch --prune origin` when the destination's origin matches. It fails instead of overwriting an existing different path. HTTPS operations use `gh auth git-credential`, backed by the GitHub CLI identity already pushed to the host. Git output is streamed and is not covered by `identity.maxTransferMb`. After repositories, enabled settings parity deep-merges an explicit portable allow-list from local `~/.t3/userdata/settings.json`; optional keybindings are copied verbatim. Absolute-path and secret-bearing settings are never copied. Restart T3 manually when sync reports changed fields. `--dry-run` performs none of these repository or settings writes.
+
+### Box-to-box bootstrap clone
+
+`bootstrap-clone` creates a selective loadout from an existing box instead of cloning its disk or operating system. It copies only paths allowlisted by both configs: for example projects, GitHub CLI configuration, dotfiles, agent configuration, skills, or caches. The source is named by `--from-config`; `cloudbox.json` is the destination. It pulls compressed rsync deltas into a mode-0700 local cache, then pushes cache deltas to the destination. Interrupted transfers keep partial files and the cache remains for cheap resumable reruns. It never deletes destination-only files.
+
+```bash
+pnpm cloudbox bootstrap-clone --from-config ../old-box/cloudbox.json --dry-run
+pnpm cloudbox bootstrap-clone --from-config ../old-box/cloudbox.json
+```
+
+The dry run wakes and reads only the source, showing its delta into the cache. A real run wakes both boxes, refreshes the cache, previews the destination leg, applies the transfer guard to each leg, then writes the destination. Excludes from both configs are combined and the smaller `bootstrap.maxTransferMb` wins. `--force` overrides the guard after review; `--cache-dir` selects a different persistent cache.
+
+This command is for selected ordinary files and directories such as projects, skills, configuration, and caches. Do not include a live T3 SQLite database. Selective thread transfer needs a consistent T3 export of its records, checkpoint refs, and optional workspace; it is a separate bootstrap adapter even when a future UI presents both in one picker.
 
 ## Build and verify locally
 
@@ -194,6 +212,7 @@ pnpm cloudbox sleep
 pnpm cloudbox sync --dry-run
 pnpm cloudbox sync
 pnpm cloudbox sync --force
+pnpm cloudbox bootstrap-clone --from-config <source-cloudbox.json> [--dry-run] [--force]
 pnpm cloudbox ssh
 pnpm cloudbox verify [--host <aws-ip>] [--expect-vm] [--json]
 pnpm cloudbox smoke-thread [--host <aws-ip>] [--timeout 240] [--keep-project] [--machine-mode]
@@ -207,6 +226,7 @@ pnpm cloudbox verify-idle [--timeout 1800] [--json]
 | `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. `--via-service` uses `CLOUDBOX_WAKE_URL` and `CLOUDBOX_WAKE_SECRET`. Then waits for SSH and prints the host. |
 | `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
 | `sync` | Shows rsync names/stats per path. Real transfers run a dry-run size guard first; `--force` overrides `maxTransferMb`. |
+| `bootstrap-clone` | Pulls allowlisted project/config/file deltas from an existing box into a private resumable cache, then pushes them to this box without deleting destination-only files. |
 | `ssh` | GCP: opens SSH to the instance name through IAP. AWS: opens direct SSH to the current public IP. |
 | `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
 | `smoke-thread` | Enables/configures pi, runs autonomous pi and Codex turns, and cleans up. `--machine-mode` also proves the Incus machine, ZFS workspace, in-machine hostname, and post-delete resource cleanup. |

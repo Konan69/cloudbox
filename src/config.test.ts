@@ -22,6 +22,11 @@ const valid = {
     excludes: ["sessions/"],
     maxTransferMb: 300,
   },
+  bootstrap: {
+    paths: ["~/.t3/userdata/", "~/src/"],
+    excludes: ["*.sqlite-shm", "*.sqlite-wal", "node_modules/"],
+    maxTransferMb: 2_000,
+  },
   repos: [
     { url: "https://github.com/example/one.git", path: "~/src/one", branch: "main" },
     { url: "git@github.com:example/two.git", path: "~/src/two" },
@@ -59,6 +64,7 @@ describe("CloudboxConfig", () => {
       expect(config.boxUser).toBe("dev");
       expect(config.repos).toHaveLength(2);
       expect(config.t3.settingsParity).toEqual({ enabled: true, keybindings: true });
+      expect(config.bootstrap?.paths).toEqual(["~/.t3/userdata/", "~/src/"]);
     }),
   );
 
@@ -152,6 +158,20 @@ describe("CloudboxConfig", () => {
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("identity");
+    }),
+  );
+
+  it.effect("refuses bootstrap paths outside the user home", () =>
+    Effect.gen(function* () {
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({
+          ...valid,
+          bootstrap: { ...valid.bootstrap, paths: ["/tank/threads/"] },
+        }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("bootstrap");
     }),
   );
 
