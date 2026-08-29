@@ -542,6 +542,7 @@ const deployGcp = (
       zone: config.gcp.zone,
       instanceName: instance.instanceName,
       rateLimitBucket: rateBucket.bucketName,
+      allowedOrigins: config.wake.allowedOrigins,
       secretName: secret.name,
       secretVersion: secretVersion.version,
       buildId: build.buildId,

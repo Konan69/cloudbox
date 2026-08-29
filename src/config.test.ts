@@ -24,6 +24,24 @@ const valid = {
   boxUser: "dev",
 };
 
+const validGcp = {
+  ...valid,
+  provider: "gcp" as const,
+  region: undefined,
+  instanceType: undefined,
+  diskGb: undefined,
+  gcp: {
+    project: "cloudbox-project",
+    zone: "us-central1-a",
+    machineType: "n2-standard-16",
+    bootDiskGb: 50,
+    dataDiskGb: 300,
+    dataDiskType: "pd-ssd",
+    credentials: "adc",
+  },
+  wake: { allowedOrigins: ["https://app.example.test", "http://localhost:3000"] },
+};
+
 describe("CloudboxConfig", () => {
   it.effect("decodes a complete config", () =>
     Effect.gen(function* () {
@@ -67,6 +85,53 @@ describe("CloudboxConfig", () => {
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("credentials");
+    }),
+  );
+
+  it.effect("requires a non-empty wake allowedOrigins list for GCP", () =>
+    Effect.gen(function* () {
+      const config = yield* parseConfig("cloudbox.json", JSON.stringify(validGcp));
+      expect(config.provider).toBe("gcp");
+      if (config.provider === "gcp") {
+        expect(config.wake.allowedOrigins).toEqual([
+          "https://app.example.test",
+          "http://localhost:3000",
+        ]);
+      }
+
+      const emptyError = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...validGcp, wake: { allowedOrigins: [] } }),
+      ).pipe(Effect.flip);
+      expect(emptyError).toBeInstanceOf(ConfigError);
+      expect(emptyError.message).toContain("allowedOrigins");
+
+      const { wake: _wake, ...missingWake } = validGcp;
+      const missingError = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify(missingWake),
+      ).pipe(Effect.flip);
+      expect(missingError).toBeInstanceOf(ConfigError);
+      expect(missingError.message).toContain("wake");
+    }),
+  );
+
+  it.effect("rejects wake origins with paths or wildcards", () =>
+    Effect.gen(function* () {
+      for (const origin of [
+        "https://app.example.test/not-an-origin",
+        "https://*.example.test",
+      ]) {
+        const error = yield* parseConfig(
+          "cloudbox.json",
+          JSON.stringify({
+            ...validGcp,
+            wake: { allowedOrigins: [origin] },
+          }),
+        ).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(ConfigError);
+        expect(error.message).toContain('["wake"]["allowedOrigins"][0]');
+      }
     }),
   );
 

@@ -91,6 +91,7 @@ describe("Alchemy GCP resource-output wiring", () => {
       zone: "europe-west2-b",
       instanceName: text,
       rateLimitBucket: text,
+      allowedOrigins: ["https://app.example.test"],
       secretName: text,
       secretVersion: text,
       buildId: text,

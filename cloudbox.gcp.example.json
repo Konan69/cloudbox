@@ -10,6 +10,9 @@
     "dataDiskType": "pd-ssd",
     "credentials": "adc"
   },
+  "wake": {
+    "allowedOrigins": ["https://your-t3-client.example.com"]
+  },
   "sshCidr": "203.0.113.10/32",
   "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
   "idleMinutes": 30,

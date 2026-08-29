@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
+import { isWakeAllowedOrigin } from "./wake/origin.ts";
+
 const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
 
 const isIpv4Cidr = (value: string): boolean => {
@@ -71,6 +73,25 @@ export const GcpConfig = Schema.Struct({
   credentials: GcpCredentials,
 });
 
+export const WakeAllowedOrigin = Schema.String.pipe(
+  Schema.refine((value): value is string => isWakeAllowedOrigin(value), {
+    identifier: "WakeAllowedOrigin",
+    description: "an origin with a scheme and host, and no path",
+  }),
+);
+
+export const WakeConfig = Schema.Struct({
+  allowedOrigins: Schema.Array(WakeAllowedOrigin).pipe(
+    Schema.refine(
+      (origins): origins is ReadonlyArray<string> => origins.length > 0,
+      {
+        identifier: "WakeAllowedOrigins",
+        description: "a non-empty list of allowed wake service origins",
+      },
+    ),
+  ),
+});
+
 const SharedConfig = {
   name: Schema.NonEmptyString,
   sshCidr: SshCidr,
@@ -94,6 +115,7 @@ export const GcpCloudboxConfig = Schema.Struct({
   name: GcpCloudboxName,
   provider: Schema.Literal("gcp"),
   gcp: GcpConfig,
+  wake: WakeConfig,
 });
 
 export const CloudboxConfig = Schema.Union([AwsCloudboxConfig, GcpCloudboxConfig]);

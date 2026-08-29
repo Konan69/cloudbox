@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import {
   buildRsyncArgs,
   CloudboxCliError,
+  requestWakeStatusViaService,
   requestWakeViaService,
   runIdentitySync,
   type IdentitySyncInput,
@@ -62,6 +63,37 @@ describe("cloudbox wake --via-service", () => {
 
       expect(error).toBeInstanceOf(CloudboxCliError);
       expect(error.message).toContain("HTTP 401");
+    }),
+  );
+});
+
+describe("cloudbox status via wake service", () => {
+  it.effect("gets the read-only status endpoint with the configured bearer", () =>
+    Effect.gen(function* () {
+      const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+      const fakeFetch: typeof fetch = async (input, init) => {
+        requests.push({ url: String(input), ...(init === undefined ? {} : { init }) });
+        return Response.json({
+          state: "suspended",
+          gceStatus: "SUSPENDED",
+          name: "dev",
+        });
+      };
+
+      const result = yield* requestWakeStatusViaService(
+        "dev",
+        "https://wake.example.test/",
+        "test-secret",
+        fakeFetch,
+      );
+
+      expect(result).toEqual({ state: "suspended", gceStatus: "SUSPENDED", name: "dev" });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.url).toBe("https://wake.example.test/status/dev");
+      expect(requests[0]?.init?.method).toBe("GET");
+      expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe(
+        "Bearer test-secret",
+      );
     }),
   );
 });

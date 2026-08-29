@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 
 import { makeCloudRunGcpClient, makeGcsRateLimiter } from "./gcpRuntime.ts";
 import { makeWakeHandler } from "./handler.ts";
+import { parseWakeAllowedOrigins } from "./origin.ts";
 
 const requiredEnv = (name: string): string => {
   const value = process.env[name]?.trim();
@@ -14,6 +15,7 @@ const zone = requiredEnv("GCP_ZONE");
 const instance = requiredEnv("GCE_INSTANCE");
 const cloudboxName = requiredEnv("CLOUDBOX_NAME");
 const wakeSecret = requiredEnv("WAKE_SECRET");
+const wakeAllowedOrigins = parseWakeAllowedOrigins(requiredEnv("WAKE_ALLOWED_ORIGINS"));
 const rateLimitBucket = requiredEnv("RATE_LIMIT_BUCKET");
 const port = Number(process.env.PORT ?? "8080");
 if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) throw new Error("Invalid PORT");
@@ -21,6 +23,7 @@ if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) throw new Error("
 const handler = makeWakeHandler({
   expectedName: cloudboxName,
   bearerSecret: wakeSecret,
+  allowedOrigins: wakeAllowedOrigins,
   gcp: makeCloudRunGcpClient({ project, zone, instance }),
   rateLimiter: makeGcsRateLimiter(rateLimitBucket),
   log: (entry) => console.info("cloudbox wake", entry),

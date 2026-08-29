@@ -13,6 +13,7 @@ export interface CloudRunBodyInput {
   readonly zone: string;
   readonly instanceName: string;
   readonly rateLimitBucket: string;
+  readonly allowedOrigins: ReadonlyArray<string>;
   readonly secretName: string;
   readonly secretVersion: string;
 }
@@ -67,6 +68,7 @@ export const buildCloudRunServiceBody = (input: CloudRunBodyInput) => ({
           { name: "GCE_INSTANCE", value: input.instanceName },
           { name: "CLOUDBOX_NAME", value: input.cloudboxName },
           { name: "RATE_LIMIT_BUCKET", value: input.rateLimitBucket },
+          { name: "WAKE_ALLOWED_ORIGINS", value: input.allowedOrigins.join(",") },
           {
             name: "WAKE_SECRET",
             valueSource: {

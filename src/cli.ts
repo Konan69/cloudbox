@@ -168,6 +168,12 @@ const WakeServiceResponse = Schema.Struct({
   state: Schema.Literals(["running", "resuming"]),
 });
 
+const WakeStatusResponse = Schema.Struct({
+  state: Schema.Literals(["suspended", "running", "resuming", "stopped", "other"]),
+  gceStatus: Schema.String,
+  name: Schema.NonEmptyString,
+});
+
 export const requestWakeViaService = (
   name: string,
   url: string,
@@ -215,6 +221,53 @@ export const requestWakeViaService = (
     );
   });
 
+export const requestWakeStatusViaService = (
+  name: string,
+  url: string,
+  secret: string,
+  fetchImpl: typeof fetch = fetch,
+) =>
+  Effect.gen(function* () {
+    let endpoint: URL;
+    try {
+      endpoint = new URL(`${url.replace(/\/$/u, "")}/status/${encodeURIComponent(name)}`);
+    } catch (cause) {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL is not a valid URL", cause),
+      );
+    }
+    if (endpoint.protocol !== "https:" && endpoint.hostname !== "localhost") {
+      return yield* Effect.fail(
+        cliError("wake service", "CLOUDBOX_WAKE_URL must use HTTPS"),
+      );
+    }
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetchImpl(endpoint, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${secret}`, Accept: "application/json" },
+        }),
+      catch: (cause) => cliError("wake service", "Wake status request failed", cause),
+    });
+    const text = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (cause) => cliError("wake service", "Could not read wake status response", cause),
+    });
+    if (!response.ok) {
+      return yield* Effect.fail(
+        cliError(
+          "wake service",
+          `Wake status returned HTTP ${String(response.status)}${text.length === 0 ? "" : `: ${text}`}`,
+        ),
+      );
+    }
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WakeStatusResponse))(text).pipe(
+      Effect.mapError((cause) =>
+        cliError("wake service", "Wake status returned an invalid response", cause),
+      ),
+    );
+  });
+
 const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -228,21 +281,43 @@ const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
   });
 
 const statusCommand = Command.make("status").pipe(
-  Command.withDescription("Show the box state and public IP."),
+  Command.withDescription("Show the provider and wake-service box state."),
   Command.withHandler(() =>
     withBox((config, _lifecycle, instance) =>
-      Console.log(
-        JSON.stringify(
-          {
-            provider: config.provider,
-            instanceId: instance.instanceId,
-            state: instance.state,
-            publicIp: instance.publicIp,
-          },
-          null,
-          2,
-        ),
-      ),
+      Effect.gen(function* () {
+        yield* Console.log(
+          JSON.stringify(
+            {
+              provider: config.provider,
+              instanceId: instance.instanceId,
+              state: instance.state,
+              publicIp: instance.publicIp,
+            },
+            null,
+            2,
+          ),
+        );
+
+        const wakeUrl = process.env.CLOUDBOX_WAKE_URL?.trim();
+        const wakeSecret = process.env.CLOUDBOX_WAKE_SECRET?.trim();
+        const missing = [
+          ...(wakeUrl === undefined || wakeUrl.length === 0 ? ["CLOUDBOX_WAKE_URL"] : []),
+          ...(wakeSecret === undefined || wakeSecret.length === 0
+            ? ["CLOUDBOX_WAKE_SECRET"]
+            : []),
+        ];
+        if (missing.length > 0) {
+          yield* Console.log(`Wake service: skipped (${missing.join(" and ")} not set).`);
+          return;
+        }
+
+        const serviceStatus = yield* requestWakeStatusViaService(
+          config.name,
+          wakeUrl!,
+          wakeSecret!,
+        );
+        yield* Console.log(`Wake service: ${JSON.stringify(serviceStatus)}`);
+      }),
     ),
   ),
 );
