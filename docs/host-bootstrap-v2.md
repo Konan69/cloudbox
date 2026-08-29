@@ -8,6 +8,12 @@
 
 The renderer does not contact GCP. Alchemy uploads the rendered inner script plus `dist/idle.mjs` and `dist/machines.mjs` to a private, content-addressed GCS assets bucket. Instance metadata contains only a small wrapper that gets a metadata-server token, downloads all three objects, verifies their SHA-256 hashes, installs them, and executes the inner script from a file with stdin detached. The generated script is intended for an Ubuntu 24.04 x86_64 VM with nested virtualization enabled and `/dev/kvm` present.
 
+## Access: IAP TCP forwarding
+
+The host is addressed as `cloudbox-<name>` through IAP TCP forwarding. The deploying principal receives `roles/iap.tunnelResourceAccessor`, and the VPC firewall allows TCP 22 only from Google's IAP range, `35.235.240.0/20`.
+
+Install and authenticate the `gcloud` CLI on the client before using `cloudbox ssh`, sync, verification, or acceptance. These commands configure SSH with `gcloud compute start-iap-tunnel` as the proxy. The VM keeps an ephemeral external IP for outbound traffic; it is not stable across suspend/resume and must never be pinned.
+
 ## Phases
 
 The script logs to `/var/log/cloudbox-bootstrap.log`. Each completed phase has a marker at `/var/lib/cloudbox/host-v2-<phase>.done`. Re-running skips completed phases. Remove one phase marker to apply a changed phase. Pass `--rebuild` to replace the `golden` image while retaining other completed phases.

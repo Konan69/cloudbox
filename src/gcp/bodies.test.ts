@@ -10,12 +10,11 @@ import {
 } from "./bodies.ts";
 
 describe("GCP request body builders", () => {
-  it("builds a port-22 firewall restricted to the configured CIDR and target tag", () => {
+  it("builds a port-22 firewall restricted to the Google IAP range", () => {
     expect(
       buildFirewallRuleBody({
         project: "cloudbox-project",
         name: "cloudbox-dev-ssh",
-        sshCidr: "203.0.113.10/32",
         targetTag: "cloudbox-dev",
         cloudboxName: "dev",
       }),
@@ -26,7 +25,7 @@ describe("GCP request body builders", () => {
       priority: 1000,
       network: "projects/cloudbox-project/global/networks/default",
       allowed: [{ IPProtocol: "tcp", ports: ["22"] }],
-      sourceRanges: ["203.0.113.10/32"],
+      sourceRanges: ["35.235.240.0/20"],
       targetTags: ["cloudbox-dev"],
     });
   });
@@ -72,6 +71,30 @@ describe("GCP request body builders", () => {
         },
       ],
     });
+  });
+
+  it("preserves existing members when adding a project role binding", () => {
+    expect(
+      buildIamPolicyWithBinding(
+        {
+          bindings: [
+            {
+              role: "roles/iap.tunnelResourceAccessor",
+              members: ["user:existing@example.com"],
+            },
+          ],
+        },
+        {
+          role: "roles/iap.tunnelResourceAccessor",
+          members: ["user:deployer@example.com"],
+        },
+      ).bindings,
+    ).toEqual([
+      {
+        role: "roles/iap.tunnelResourceAccessor",
+        members: ["user:existing@example.com", "user:deployer@example.com"],
+      },
+    ]);
   });
 
   it("builds a separately managed SSD data disk", () => {
@@ -120,6 +143,9 @@ describe("GCP request body builders", () => {
       autoDelete: false,
       deviceName: "cloudbox-dev-data",
     });
+    expect(body.networkInterfaces[0]?.accessConfigs).toEqual([
+      { name: "External NAT", type: "ONE_TO_ONE_NAT", networkTier: "PREMIUM" },
+    ]);
     expect(body.metadata.items).toContainEqual({
       key: "ssh-keys",
       value: "dev:ssh-ed25519 AAAATEST laptop",

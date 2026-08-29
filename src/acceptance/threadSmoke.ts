@@ -6,7 +6,11 @@ import { createHash, randomUUID } from "node:crypto";
 import * as Net from "node:net";
 
 import type { CloudboxConfig } from "../config.ts";
-import { privateKeyPathFromConfig } from "./index.ts";
+import {
+  requireSshTransport,
+  SshTransportError,
+  type SshTransport,
+} from "../ssh/transport.ts";
 
 const SMOKE_REPOSITORY = "/home/dev/smoke-repo";
 const T3_PORT = 3773;
@@ -692,27 +696,19 @@ const runCaptured = (
   });
 
 const sshArgs = (
-  config: CloudboxConfig,
-  host: string,
+  transport: SshTransport,
   extra: ReadonlyArray<string> = [],
-): ReadonlyArray<string> => [
-  "-i",
-  privateKeyPathFromConfig(config.sshPublicKeyPath),
-  "-o",
-  "BatchMode=yes",
-  "-o",
-  "StrictHostKeyChecking=accept-new",
-  "-o",
-  "ConnectTimeout=10",
-  "-o",
-  "ServerAliveInterval=10",
-  "-o",
-  "ServerAliveCountMax=3",
-  ...extra,
-  `${config.boxUser}@${host}`,
-];
+): ReadonlyArray<string> =>
+  transport.args({
+    batchMode: true,
+    strictHostKeyChecking: true,
+    connectTimeoutSeconds: 10,
+    serverAliveIntervalSeconds: 10,
+    serverAliveCountMax: 3,
+    extra,
+  });
 
-const prepareRemote = async (config: CloudboxConfig, host: string): Promise<string> => {
+const prepareRemote = async (transport: SshTransport): Promise<string> => {
   const script = `set -euo pipefail
 repo=${SMOKE_REPOSITORY}
 if [ -e "$repo" ] && [ ! -d "$repo/.git" ]; then
@@ -730,7 +726,7 @@ cat /home/dev/.t3/idle-detector.token
 `;
   const output = await runCaptured(
     "ssh",
-    [...sshArgs(config, host), "bash", "-s"],
+    [...sshArgs(transport), "bash", "-s"],
     script,
     30_000,
   );
@@ -793,21 +789,18 @@ const asString = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
 
 class LiveThreadSmokeTransport implements ThreadSmokeTransport {
-  readonly #config: CloudboxConfig;
-  readonly #host: string;
+  readonly #ssh: SshTransport;
   readonly #origin: string;
   readonly #token: string;
   readonly #tunnel: ChildProcessWithoutNullStreams;
 
   constructor(
-    config: CloudboxConfig,
-    host: string,
+    ssh: SshTransport,
     origin: string,
     token: string,
     tunnel: ChildProcessWithoutNullStreams,
   ) {
-    this.#config = config;
-    this.#host = host;
+    this.#ssh = ssh;
     this.#origin = origin;
     this.#token = token;
     this.#tunnel = tunnel;
@@ -835,7 +828,7 @@ class LiveThreadSmokeTransport implements ThreadSmokeTransport {
   ): Promise<Record<string, unknown>> {
     const output = await runCaptured(
       "ssh",
-      [...sshArgs(this.#config, this.#host), "bash", "-s", "--", ...args],
+      [...sshArgs(this.#ssh), "bash", "-s", "--", ...args],
       script,
       timeoutMs,
     );
@@ -1327,16 +1320,15 @@ jq -nc \
 }
 
 const acquireLiveTransport = async (
-  config: CloudboxConfig,
-  host: string,
+  ssh: SshTransport,
 ): Promise<LiveThreadSmokeTransport> => {
-  const token = await prepareRemote(config, host);
+  const token = await prepareRemote(ssh);
   const port = await reserveLocalPort();
   const origin = `http://127.0.0.1:${String(port)}`;
   const tunnel = spawn(
     "ssh",
     [
-      ...sshArgs(config, host, [
+      ...sshArgs(ssh, [
         "-o",
         "ExitOnForwardFailure=yes",
         "-N",
@@ -1349,7 +1341,7 @@ const acquireLiveTransport = async (
   );
   try {
     await waitForTunnel(origin, tunnel);
-    return new LiveThreadSmokeTransport(config, host, origin, token, tunnel);
+    return new LiveThreadSmokeTransport(ssh, origin, token, tunnel);
   } catch (cause) {
     tunnel.kill("SIGTERM");
     throw smokeError("open T3 SSH tunnel", "Could not reach the T3 server through SSH.", cause);
@@ -1358,15 +1350,28 @@ const acquireLiveTransport = async (
 
 export const makeSshThreadSmokeTransport = (
   config: CloudboxConfig,
-  host: string,
+  awsHost?: string,
 ): Effect.Effect<ThreadSmokeTransport, ThreadSmokeError, Scope.Scope> =>
   Effect.acquireRelease(
-    Effect.tryPromise({
-      try: () => acquireLiveTransport(config, host),
-      catch: (cause) =>
-        cause instanceof ThreadSmokeError
-          ? cause
-          : smokeError("connect to T3", "Could not create the T3 smoke transport.", cause),
+    Effect.gen(function* () {
+      const ssh = yield* Effect.try({
+        try: () => requireSshTransport(config, awsHost),
+        catch: (cause) =>
+          smokeError(
+            "SSH transport",
+            cause instanceof SshTransportError
+              ? cause.message
+              : "Could not configure the SSH transport.",
+            cause,
+          ),
+      });
+      return yield* Effect.tryPromise({
+        try: () => acquireLiveTransport(ssh),
+        catch: (cause) =>
+          cause instanceof ThreadSmokeError
+            ? cause
+            : smokeError("connect to T3", "Could not create the T3 smoke transport.", cause),
+      });
     }),
     (transport) => Effect.promise(() => transport.close()),
   );

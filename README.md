@@ -7,7 +7,7 @@ One personal AWS EC2 or Google Compute Engine development machine for dev. It ru
 Select `provider: "aws"` or `provider: "gcp"` in `cloudbox.json`. AWS creates:
 
 - One VPC with a public subnet and internet routing.
-- One imported EC2 SSH key and one security group: TCP 22 only from `sshCidr`; unrestricted egress.
+- One imported EC2 SSH key and one security group: TCP 22 only from `aws.sshCidr`; unrestricted egress.
 - One EC2 role/profile. The inline policy grants `ec2:StopInstances` and `ec2:DescribeInstances` only with the `aws:ResourceTag/cloudbox=<name>` condition.
 - One Ubuntu 24.04 x86_64 EC2 instance with an encrypted gp3 root disk, IMDSv2-only metadata, and hibernation enabled at launch.
 - A local Alchemy state tree under `.alchemy/state/`.
@@ -24,7 +24,7 @@ The AMI is never hardcoded. CloudFormation resolves Canonical's public SSM param
 
 - Node.js `>=24.10`, pnpm `11.10.0`, and AWS permissions to create EC2, VPC, IAM, and CloudFormation resources.
 - An existing public SSH key.
-- `rsync` and `ssh` on the laptop.
+- `rsync` and `ssh` on the laptop; GCP access also requires an authenticated `gcloud` CLI.
 - An AWS region and instance type that support hibernation.
 
 ### AWS credentials
@@ -43,7 +43,7 @@ The laptop CLI uses the AWS SDK default credential chain. It supports the standa
 
 ## GCP host
 
-The GCP stack uses a custom Effect-native Alchemy provider and Google REST APIs through the configured ADC. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, one Ubuntu 24.04 x86_64 instance, and the Cloud Run wake service with its GCS, Artifact Registry, Cloud Build, and Secret Manager resources. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an external IP, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
+The GCP stack uses a custom Effect-native Alchemy provider and Google REST APIs through the configured ADC. It creates one SSH firewall rule on the default VPC, one separate `pd-ssd` or `pd-balanced` data disk, one Ubuntu 24.04 x86_64 instance, and the Cloud Run wake service with its GCS, Artifact Registry, Cloud Build, and Secret Manager resources. SSH addresses the instance by name through IAP; the firewall allows port 22 only from `35.235.240.0/20`, and the deployer receives `roles/iap.tunnelResourceAccessor`. The instance uses an Intel N1/N2/C2 machine type, nested virtualization, an explicit boot-disk size, an ephemeral external IP for egress, and the `cloudbox=<name>` label. The default VPC and default Compute Engine service account must already exist. Disks and instances are adopted only when name and label match. Compute firewall rules do not support labels, so firewall ownership uses its generated name plus exact Cloudbox description.
 
 The host v2 Incus path requires an N2 machine type so KVM is available through `/dev/kvm`. The standard GCP example is the full host. `cloudbox.test.example.json` is the cheap test host: `n2-standard-2`, a 30 GB boot disk, and a 50 GB balanced data disk.
 
@@ -89,7 +89,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, and `diskGb`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials. Identity sync requires `maxTransferMb`. `sshCidr` rejects `0.0.0.0/0`.
+Every field for the selected provider is required. There are no config defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`.
 
 The public fork is cloned directly from `https://github.com/example/t3code.git`; no GitHub token enters EC2 user data.
 
@@ -174,19 +174,19 @@ pnpm cloudbox sync --dry-run
 pnpm cloudbox sync
 pnpm cloudbox sync --force
 pnpm cloudbox ssh
-pnpm cloudbox verify --host <ip> [--expect-vm] [--json]
-pnpm cloudbox smoke-thread --host <ip> [--timeout 240] [--keep-project] [--machine-mode]
+pnpm cloudbox verify [--host <aws-ip>] [--expect-vm] [--json]
+pnpm cloudbox smoke-thread [--host <aws-ip>] [--timeout 240] [--keep-project] [--machine-mode]
 pnpm cloudbox verify-sleep [--timeout 1800] [--json]
 pnpm cloudbox verify-idle [--timeout 1800] [--json]
 ```
 
 | Command | Behavior |
 |---|---|
-| `status` | Prints provider, instance ID/name, cloud state, and current public IP. |
-| `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. `--via-service` uses `CLOUDBOX_WAKE_URL` and `CLOUDBOX_WAKE_SECRET`. Then waits for TCP 22 and prints the IP. |
+| `status` | Prints provider, instance ID/name, zone or region, cloud state, access path, and current public IP when present. |
+| `wake` | AWS: starts. GCP: resumes `SUSPENDED`, or starts `TERMINATED`. `--via-service` uses `CLOUDBOX_WAKE_URL` and `CLOUDBOX_WAKE_SECRET`. Then waits for SSH and prints the host. |
 | `sleep` | AWS: hibernates. GCP: calls `instances.suspend` to preserve memory. |
 | `sync` | Shows rsync names/stats per path. Real transfers run a dry-run size guard first; `--force` overrides `maxTransferMb`. |
-| `ssh` | Opens `ssh dev@<current-public-ip>`. |
+| `ssh` | GCP: opens SSH to the instance name through IAP. AWS: opens direct SSH to the current public IP. |
 | `verify` | Runs named bootstrap, tool, ZFS, Incus, T3, timer, and Docker checks over SSH. |
 | `smoke-thread` | Enables/configures pi, runs autonomous pi and Codex turns, and cleans up. `--machine-mode` also proves the Incus machine, ZFS workspace, in-machine hostname, and post-delete resource cleanup. |
 | `verify-sleep` | Sleeps and wakes through the configured provider, then proves uptime and a marker PID survived. |
@@ -194,7 +194,7 @@ pnpm cloudbox verify-idle [--timeout 1800] [--json]
 
 Verification prints a table by default or JSON with `--json`, and exits non-zero if any check fails. `--timeout` is seconds. See [docs/testing.md](docs/testing.md) and [scripts/cloud-test.md](scripts/cloud-test.md).
 
-The public IP may change after hibernation because v1 does not allocate an Elastic IP. Every command discovers the current address.
+GCP's external IP is ephemeral egress state and may change after suspend/resume; it must never be pinned. GCP access uses the instance name through IAP. AWS commands continue to discover and use the current public IP.
 
 ## Box services
 

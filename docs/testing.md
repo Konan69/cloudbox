@@ -19,21 +19,27 @@ It runs typechecking, tests, and the static bootstrap check. It does not run Doc
 ## Remote acceptance
 
 ```bash
-node dist/cli.mjs verify --host 203.0.113.42
-node dist/cli.mjs verify --host 203.0.113.42 --expect-vm
-node dist/cli.mjs verify --host 203.0.113.42 --json
-node dist/cli.mjs smoke-thread --host 203.0.113.42 [--keep-project] [--machine-mode]
+node dist/cli.mjs verify
+node dist/cli.mjs verify --expect-vm
+node dist/cli.mjs verify --json
+node dist/cli.mjs smoke-thread [--keep-project] [--machine-mode]
 node dist/cli.mjs verify-sleep --timeout 1800
 node dist/cli.mjs verify-idle --timeout 1800
 ```
 
-`--json` is optional; the default output is a table. `--timeout` is seconds. `verify-idle` requires a timeout greater than `(idleMinutes + 5) * 60`. Every verification command exits non-zero when a check fails. SSH uses `boxUser@host` and derives the private key by removing `.pub` from `sshPublicKeyPath`; the configured path must end in `.pub`.
+`--json` is optional; the default output is a table. `--timeout` is seconds. `verify-idle` requires a timeout greater than `(idleMinutes + 5) * 60`. Every verification command exits non-zero when a check fails. SSH uses `boxUser` and derives the private key by removing `.pub` from `sshPublicKeyPath`; the configured path must end in `.pub`. On AWS, pass `--host <public-ip>` to `verify` and `smoke-thread`. `--host` is rejected for GCP.
+
+## Access: IAP TCP forwarding
+
+GCP verification and smoke commands address `cloudbox-<name>` through IAP, not the external IP. Install and authenticate the `gcloud` CLI first. The deployer receives `roles/iap.tunnelResourceAccessor`, and the SSH firewall accepts TCP 22 only from Google's IAP range, `35.235.240.0/20`.
+
+`cloudbox ssh`, sync, verification, and acceptance all use `gcloud compute start-iap-tunnel` as SSH's `ProxyCommand`. The VM keeps an ephemeral external IP for egress, but that IP is not stable across suspend/resume and must never be pinned.
 
 ## Autonomous T3 thread smoke
 
 ```bash
 pnpm build:cli
-node dist/cli.mjs smoke-thread --host 203.0.113.42 --timeout 240 [--keep-project] [--machine-mode]
+node dist/cli.mjs smoke-thread --timeout 240 [--keep-project] [--machine-mode]
 ```
 
 The command prepares `/home/dev/smoke-repo` over SSH, opens an SSH tunnel to the loopback-only T3 server, and reads the existing automation bearer. It prints the environment ID and reads environment-owned settings with `server.getSettings`. When pi is disabled, it uses `server.updateSettings` to add an enabled `pi` provider instance with default model `openai-codex/gpt-5.6-sol`, and logs `enabled provider pi in environment settings`. It then refreshes the provider catalog and runs separate `pi` (`openai-codex/gpt-5.6-sol`) and `codex` (`gpt-5.6-sol`) cases. Each case prints its own PASS/FAIL, thread ID, and assistant text.

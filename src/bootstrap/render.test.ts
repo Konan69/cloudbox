@@ -8,10 +8,10 @@ import { renderBootstrap, renderUserData } from "./render.ts";
 const config = Schema.decodeUnknownSync(CloudboxConfig)({
   provider: "aws",
   name: "dev",
+  aws: { sshCidr: "203.0.113.10/32" },
   region: "us-east-1",
   instanceType: "m7i.4xlarge",
   diskGb: 300,
-  sshCidr: "203.0.113.10/32",
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {

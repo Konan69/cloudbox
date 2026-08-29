@@ -232,7 +232,7 @@ const deployAws = (config: AwsCloudboxConfig, sshPublicKey: string, userData: st
           ipProtocol: "tcp",
           fromPort: 22,
           toPort: 22,
-          cidrIpv4: config.sshCidr,
+          cidrIpv4: config.aws.sshCidr,
           description: "SSH from configured CIDR only",
         },
       ],
@@ -302,6 +302,7 @@ const deployGcp = (
       "artifactregistry.googleapis.com",
       "secretmanager.googleapis.com",
       "storage.googleapis.com",
+      "iap.googleapis.com",
     ] as const;
     const apis = yield* Effect.all(
       apiNames.map((service) =>
@@ -312,14 +313,28 @@ const deployGcp = (
       ),
     );
     const api = Object.fromEntries(apiNames.map((name, index) => [name, apis[index]!.serviceName]));
+    const deployingPrincipal = yield* Effect.tryPromise({
+      try: () => GCP.resolveDeployingPrincipal(config.gcp.credentials),
+      catch: (cause) =>
+        new DeploymentInputError({
+          message: "Cannot resolve the deploying principal from the ADC token via Google tokeninfo",
+          cause,
+        }),
+    }).pipe(Effect.orDie);
     const projectInfo = yield* GCP.GcpProjectInfo("CloudboxProjectInfo", {
       project: config.gcp.project,
     });
     const projectNumber = projectInfo.projectNumber;
+    yield* GCP.GcpResourceIamBinding("CloudboxIapTunnelAccess", {
+      target: "project",
+      resourceName: `projects/${config.gcp.project}`,
+      member: deployingPrincipal,
+      role: "roles/iap.tunnelResourceAccessor",
+      apiService: api["iap.googleapis.com"]!,
+    });
     yield* GCP.GcpFirewallRule("CloudboxSshFirewall", {
       project: config.gcp.project,
       name: `${instanceName}-ssh`,
-      sshCidr: config.sshCidr,
       targetTag: networkTag,
       cloudboxName: config.name,
     });

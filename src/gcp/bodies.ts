@@ -1,7 +1,6 @@
 export interface FirewallRuleBodyInput {
   readonly project: string;
   readonly name: string;
-  readonly sshCidr: string;
   readonly targetTag: string;
   readonly cloudboxName: string;
 }
@@ -58,6 +57,8 @@ export interface IamPolicy {
   readonly bindings?: ReadonlyArray<IamPolicyBinding> | undefined;
 }
 
+export const GCP_IAP_TCP_FORWARDING_CIDR = "35.235.240.0/20";
+
 export const buildFirewallRuleBody = (input: FirewallRuleBodyInput) => ({
   name: input.name,
   description: `SSH access for cloudbox ${input.cloudboxName}`,
@@ -65,7 +66,7 @@ export const buildFirewallRuleBody = (input: FirewallRuleBodyInput) => ({
   priority: 1000,
   network: `projects/${input.project}/global/networks/default`,
   allowed: [{ IPProtocol: "tcp", ports: ["22"] }],
-  sourceRanges: [input.sshCidr],
+  sourceRanges: [GCP_IAP_TCP_FORWARDING_CIDR],
   targetTags: [input.targetTag],
 });
 
@@ -101,15 +102,20 @@ export const buildIamPolicyWithBinding = (
   policy: IamPolicy,
   binding: IamPolicyBinding,
 ): IamPolicy => {
-  const bindings = (policy.bindings ?? []).filter(
-    (current) =>
-      current.role !== binding.role ||
-      JSON.stringify(current.condition) !== JSON.stringify(binding.condition),
-  );
+  const sameBinding = (current: IamPolicyBinding) =>
+    current.role === binding.role &&
+    JSON.stringify(current.condition) === JSON.stringify(binding.condition);
+  const existingMembers = (policy.bindings ?? [])
+    .filter(sameBinding)
+    .flatMap((current) => current.members);
+  const bindings = (policy.bindings ?? []).filter((current) => !sameBinding(current));
   return {
     version: Math.max(policy.version ?? 1, binding.condition === undefined ? 1 : 3),
     ...(policy.etag === undefined ? {} : { etag: policy.etag }),
-    bindings: [...bindings, binding],
+    bindings: [
+      ...bindings,
+      { ...binding, members: [...new Set([...existingMembers, ...binding.members])] },
+    ],
   };
 };
 

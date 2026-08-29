@@ -96,7 +96,6 @@ export class GcpResourceError extends Data.TaggedError("GcpResourceError")<{
 export interface GcpFirewallRuleProps {
   readonly project: string;
   readonly name: string;
-  readonly sshCidr: string;
   readonly targetTag: string;
   readonly cloudboxName: string;
 }
@@ -170,6 +169,22 @@ export const GcpInstance = Resource<GcpInstance>("GCP.Compute.Instance");
 
 const lastPathPart = (value: string): string => value.split("/").at(-1) ?? value;
 const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
+
+export const diffGcpInstanceProps = (
+  olds: GcpInstanceProps | undefined,
+  news: GcpInstanceProps,
+) => {
+  if (olds === undefined) return { action: "update" } as const;
+  const replace =
+    olds.project !== news.project ||
+    olds.zone !== news.zone ||
+    olds.name !== news.name ||
+    olds.machineType !== news.machineType ||
+    olds.bootDiskGb !== news.bootDiskGb ||
+    olds.dataDiskName !== news.dataDiskName;
+  if (replace) return { action: "replace", deleteFirst: olds.name === news.name } as const;
+  return same(olds, news) ? undefined : { action: "update" } as const;
+};
 
 const firewallAttrs = (firewall: FirewallResponse, targetTag: string) => ({
   firewallRuleName: firewall.name,
@@ -386,16 +401,7 @@ export const GcpInstanceProvider = (api: GcpApi) =>
     stables: ["instanceName", "zone", "dataDiskName"],
     diff: Effect.fn(function* ({ olds, news }) {
       if (!isResolved(news)) return undefined;
-      if (olds === undefined) return { action: "update" } as const;
-      const replace =
-        olds.project !== news.project ||
-        olds.zone !== news.zone ||
-        olds.name !== news.name ||
-        olds.machineType !== news.machineType ||
-        olds.bootDiskGb !== news.bootDiskGb ||
-        olds.dataDiskName !== news.dataDiskName;
-      if (replace) return { action: "replace", deleteFirst: olds.name === news.name } as const;
-      return same(olds, news) ? undefined : { action: "update" } as const;
+      return diffGcpInstanceProps(olds, news);
     }),
     read: Effect.fn(function* ({ olds, output }) {
       const name = output?.instanceName ?? olds?.name;

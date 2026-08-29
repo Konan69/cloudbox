@@ -7,7 +7,6 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
 import { spawn } from "node:child_process";
-import * as Net from "node:net";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
@@ -33,6 +32,12 @@ import {
   type ProviderInstance,
   type ProviderLifecycle,
 } from "./provider/lifecycle.ts";
+import {
+  assertSshPrerequisites,
+  requireSshTransport,
+  SshTransportError,
+  type SshTransport,
+} from "./ssh/transport.ts";
 
 export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
   readonly operation: string;
@@ -64,30 +69,6 @@ const withBox = <A, E>(
     return yield* effect(config, lifecycle, instance);
   });
 
-const connectToPort = (host: string, port: number) =>
-  Effect.callback<void, CloudboxCliError>((resume) => {
-    const socket = Net.createConnection({ host, port });
-    const finish = (result: Effect.Effect<void, CloudboxCliError>) => {
-      socket.destroy();
-      resume(result);
-    };
-    socket.setTimeout(5_000);
-    socket.once("connect", () => finish(Effect.void));
-    socket.once("timeout", () =>
-      finish(Effect.fail(cliError("poll SSH", `Timed out connecting to ${host}:${String(port)}`))),
-    );
-    socket.once("error", (cause) =>
-      finish(Effect.fail(cliError("poll SSH", `Cannot connect to ${host}:${String(port)}`, cause))),
-    );
-  });
-
-const waitForSsh = (host: string) =>
-  connectToPort(host, 22).pipe(
-    Effect.retry({
-      schedule: Schedule.recurs(150).pipe(Schedule.addDelay(() => Effect.succeed("2 seconds"))),
-    }),
-  );
-
 const runProcess = (command: string, args: ReadonlyArray<string>) =>
   Effect.callback<void, CloudboxCliError>((resume) => {
     const child = spawn(command, [...args], { stdio: "inherit" });
@@ -106,6 +87,16 @@ const runProcess = (command: string, args: ReadonlyArray<string>) =>
       }
     });
   });
+
+const waitForSsh = (transport: SshTransport) =>
+  runProcess("ssh", [
+    ...transport.args({ batchMode: true, connectTimeoutSeconds: 5 }),
+    "true",
+  ]).pipe(
+    Effect.retry({
+      schedule: Schedule.recurs(150).pipe(Schedule.addDelay(() => Effect.succeed("2 seconds"))),
+    }),
+  );
 
 export interface ProcessOutput {
   readonly stdout: string;
@@ -163,6 +154,25 @@ const runCapturedProcess = (command: string, args: ReadonlyArray<string>) =>
   });
 
 const requirePublicIp = (instance: BoxInstance) => requireString("public IP", instance.publicIp);
+
+const sshTransportError = (cause: unknown) =>
+  cliError(
+    "SSH transport",
+    cause instanceof SshTransportError ? cause.message : "Could not configure SSH transport",
+    cause,
+  );
+
+const checkSshPrerequisites = (config: CloudboxConfig) =>
+  Effect.try({
+    try: () => assertSshPrerequisites(config),
+    catch: sshTransportError,
+  });
+
+const makeSshTransport = (config: CloudboxConfig, awsHost?: string) =>
+  Effect.try({
+    try: () => requireSshTransport(config, awsHost),
+    catch: sshTransportError,
+  });
 
 const WakeServiceResponse = Schema.Struct({
   state: Schema.Literals(["running", "resuming"]),
@@ -228,15 +238,19 @@ const waitForProviderRunning = (lifecycle: ProviderLifecycle) =>
   });
 
 const statusCommand = Command.make("status").pipe(
-  Command.withDescription("Show the box state and public IP."),
+  Command.withDescription("Show the box state and access path."),
   Command.withHandler(() =>
     withBox((config, _lifecycle, instance) =>
       Console.log(
         JSON.stringify(
           {
             provider: config.provider,
+            instanceName: config.provider === "gcp" ? instance.instanceId : undefined,
             instanceId: instance.instanceId,
+            zone: config.provider === "gcp" ? config.gcp.zone : undefined,
+            region: config.provider === "aws" ? config.region : undefined,
             state: instance.state,
+            access: config.provider === "gcp" ? "ssh via IAP" : "direct SSH",
             publicIp: instance.publicIp,
           },
           null,
@@ -253,10 +267,11 @@ const viaServiceFlag = Flag.boolean("via-service").pipe(
 );
 
 const wakeCommand = Command.make("wake", { viaService: viaServiceFlag }).pipe(
-  Command.withDescription("Start or resume the box, wait for SSH, then print its IP."),
+  Command.withDescription("Start or resume the box, wait for SSH, then print its host."),
   Command.withHandler(({ viaService }) =>
     withBox((config, lifecycle, _instance) =>
       Effect.gen(function* () {
+        yield* checkSshPrerequisites(config);
         let running: BoxInstance;
         if (viaService) {
           if (config.provider !== "gcp") {
@@ -281,9 +296,12 @@ const wakeCommand = Command.make("wake", { viaService: viaServiceFlag }).pipe(
         } else {
           running = yield* lifecycle.wake;
         }
-        const publicIp = yield* requirePublicIp(running);
-        yield* waitForSsh(publicIp);
-        yield* Console.log(publicIp);
+        const awsHost = config.provider === "aws"
+          ? yield* requirePublicIp(running)
+          : undefined;
+        const transport = yield* makeSshTransport(config, awsHost);
+        yield* waitForSsh(transport);
+        yield* Console.log(transport.host);
       }),
     ),
   ),
@@ -312,8 +330,7 @@ const withTrailingSlash = (path: string): string =>
 export interface RsyncArgsInput {
   readonly path: string;
   readonly localHome: string;
-  readonly boxUser: string;
-  readonly publicIp: string;
+  readonly transport: SshTransport;
   readonly excludes: ReadonlyArray<string>;
   readonly dryRun: boolean;
 }
@@ -321,8 +338,7 @@ export interface RsyncArgsInput {
 export const buildRsyncArgs = ({
   path,
   localHome,
-  boxUser,
-  publicIp,
+  transport,
   excludes,
   dryRun,
 }: RsyncArgsInput): ReadonlyArray<string> => {
@@ -335,11 +351,13 @@ export const buildRsyncArgs = ({
     "-az",
     "--mkpath",
     "--info=stats2,name1",
+    "-e",
+    transport.rsyncRemoteShell({ batchMode: true }),
     ...(dryRun ? ["--dry-run"] : []),
     ...excludes.map((exclude) => `--exclude=${exclude}`),
     "--",
     source,
-    `${boxUser}@${publicIp}:${remotePath}`,
+    `${transport.target}:${remotePath}`,
   ];
 };
 
@@ -404,8 +422,7 @@ export interface IdentitySyncInput {
   readonly excludes: ReadonlyArray<string>;
   readonly maxTransferMb: number;
   readonly localHome: string;
-  readonly boxUser: string;
-  readonly publicIp: string;
+  readonly transport: SshTransport;
   readonly dryRun: boolean;
   readonly force: boolean;
 }
@@ -418,8 +435,7 @@ export const runIdentitySync = (input: IdentitySyncInput, runner: RsyncRunner) =
         buildRsyncArgs({
           path,
           localHome: input.localHome,
-          boxUser: input.boxUser,
-          publicIp: input.publicIp,
+          transport: input.transport,
           excludes: input.excludes,
           dryRun,
         }),
@@ -450,15 +466,17 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
   Command.withHandler(({ dryRun, force }) =>
     withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
-        const publicIp = yield* requirePublicIp(instance);
+        const awsHost = config.provider === "aws"
+          ? yield* requirePublicIp(instance)
+          : undefined;
+        const transport = yield* makeSshTransport(config, awsHost);
         yield* runIdentitySync(
           {
             paths: config.identity.paths,
             excludes: config.identity.excludes,
             maxTransferMb: config.identity.maxTransferMb,
             localHome: NodeOs.homedir(),
-            boxUser: config.boxUser,
-            publicIp,
+            transport,
             dryRun,
             force,
           },
@@ -474,8 +492,11 @@ const sshCommand = Command.make("ssh").pipe(
   Command.withHandler(() =>
     withBox((config, _lifecycle, instance) =>
       Effect.gen(function* () {
-        const publicIp = yield* requirePublicIp(instance);
-        yield* runProcess("ssh", [`${config.boxUser}@${publicIp}`]);
+        const awsHost = config.provider === "aws"
+          ? yield* requirePublicIp(instance)
+          : undefined;
+        const transport = yield* makeSshTransport(config, awsHost);
+        yield* runProcess("ssh", transport.args());
       }),
     ),
   ),
@@ -502,7 +523,10 @@ const printVerificationReport = (report: VerificationReport, json: boolean) =>
   });
 
 const verifyCommand = Command.make("verify", {
-  host: Flag.string("host").pipe(Flag.withDescription("Public IP or hostname to verify.")),
+  host: Flag.string("host").pipe(
+    Flag.withDefault(""),
+    Flag.withDescription("AWS-only public IP or hostname. GCP uses the configured instance name."),
+  ),
   expectVm: Flag.boolean("expect-vm").pipe(
     Flag.withDefault(false),
     Flag.withDescription("Also launch and test an Incus VM through /dev/kvm."),
@@ -513,14 +537,21 @@ const verifyCommand = Command.make("verify", {
   Command.withHandler(({ expectVm, host, json }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig("cloudbox.json");
-      const report = yield* runAcceptanceSuite(config, host, expectVm);
+      const report = yield* runAcceptanceSuite(
+        config,
+        host.length === 0 ? undefined : host,
+        expectVm,
+      );
       yield* printVerificationReport(report, json);
     }),
   ),
 );
 
 const smokeThreadCommand = Command.make("smoke-thread", {
-  host: Flag.string("host").pipe(Flag.withDescription("Public IP or hostname running T3.")),
+  host: Flag.string("host").pipe(
+    Flag.withDefault(""),
+    Flag.withDescription("AWS-only public IP or hostname. GCP uses the configured instance name."),
+  ),
   timeout: Flag.integer("timeout").pipe(
     Flag.withDefault(240),
     Flag.withDescription("Maximum seconds for each provider turn."),
@@ -538,7 +569,10 @@ const smokeThreadCommand = Command.make("smoke-thread", {
   Command.withHandler(({ host, keepProject, machineMode, timeout }) =>
     Effect.gen(function* () {
       const config = yield* loadConfig("cloudbox.json");
-      const transport = yield* makeSshThreadSmokeTransport(config, host);
+      const transport = yield* makeSshThreadSmokeTransport(
+        config,
+        host.length === 0 ? undefined : host,
+      );
       const report = yield* runThreadSmokeSuite(transport, {
         keepProject,
         machineMode,

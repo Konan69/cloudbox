@@ -9,19 +9,36 @@ import {
   type IdentitySyncInput,
   type RsyncRunner,
 } from "./cli.ts";
+import type { AwsCloudboxConfig } from "./config.ts";
+import { buildSshTransport } from "./ssh/transport.ts";
 
 const statsOutput = (files: number, bytes: number) => `
 Number of regular files transferred: ${String(files)}
 Total transferred file size: ${String(bytes)} bytes
 `;
 
+const awsConfig: AwsCloudboxConfig = {
+  provider: "aws",
+  name: "dev",
+  aws: { sshCidr: "203.0.113.10/32" },
+  region: "us-east-1",
+  instanceType: "m7i.4xlarge",
+  diskGb: 300,
+  sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
+  idleMinutes: 30,
+  t3: { repoUrl: "https://example.test/t3.git", branch: "main" },
+  identity: { paths: ["~/.pi/"], excludes: ["sessions/"], maxTransferMb: 100 },
+  boxUser: "dev",
+};
+
+const sshTransport = buildSshTransport(awsConfig, "203.0.113.20");
+
 const syncInput: IdentitySyncInput = {
   paths: ["~/.claude/skills/", "~/.pi/agent/settings.json"],
   excludes: ["sessions/", "*.jsonl"],
   maxTransferMb: 1,
   localHome: "/home/laptop-user",
-  boxUser: "dev",
-  publicIp: "203.0.113.20",
+  transport: sshTransport,
   dryRun: false,
   force: false,
 };
@@ -71,14 +88,14 @@ describe("cloudbox sync", () => {
     const args = buildRsyncArgs({
       path: "~/.claude/skills/",
       localHome: "/home/laptop-user",
-      boxUser: "dev",
-      publicIp: "203.0.113.20",
+      transport: sshTransport,
       excludes: ["sessions/"],
       dryRun: true,
     });
 
     expect(args).toContain("--info=stats2,name1");
     expect(args).toContain("--dry-run");
+    expect(args).toContain("-e");
     expect(args.at(-2)).toBe("/home/laptop-user/.claude/skills/");
     expect(args.at(-1)).toBe("dev@203.0.113.20:~/.claude/skills/");
     expect(args.at(-1)).not.toContain(":/home/laptop-user/");

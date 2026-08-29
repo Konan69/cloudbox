@@ -2,8 +2,6 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import * as NodeOs from "node:os";
-import * as NodePath from "node:path";
 import { spawn } from "node:child_process";
 
 import type { CloudboxConfig } from "../config.ts";
@@ -13,6 +11,13 @@ import {
   type ProviderInstance,
   type ProviderLifecycle,
 } from "../provider/lifecycle.ts";
+import {
+  requireSshTransport,
+  SshTransportError,
+  type SshTransport,
+} from "../ssh/transport.ts";
+
+export { privateKeyPathFromConfig } from "../ssh/transport.ts";
 
 export const VerificationResult = Schema.Struct({
   name: Schema.NonEmptyString,
@@ -38,12 +43,6 @@ interface ProcessOutput {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
-}
-
-interface SshTarget {
-  readonly host: string;
-  readonly user: string;
-  readonly privateKeyPath: string;
 }
 
 export interface AcceptanceCheck {
@@ -105,51 +104,30 @@ const runProcess = (
     child.stdin.end(input);
   });
 
-export const privateKeyPathFromConfig = (publicKeyPath: string): string => {
-  const expanded = publicKeyPath === "~" || publicKeyPath.startsWith("~/")
-    ? NodePath.join(NodeOs.homedir(), publicKeyPath.slice(2))
-    : NodePath.resolve(publicKeyPath);
-  if (!expanded.endsWith(".pub")) {
-    throw acceptanceError(
-      "SSH key",
-      `sshPublicKeyPath must end in .pub so verification can select its private key: ${publicKeyPath}`,
-    );
-  }
-  return expanded.slice(0, -4);
-};
-
-const sshTarget = (config: CloudboxConfig, host: string): SshTarget => ({
-  host,
-  user: config.boxUser,
-  privateKeyPath: privateKeyPathFromConfig(config.sshPublicKeyPath),
-});
-
-const makeSshTarget = (config: CloudboxConfig, host: string) =>
+const makeSshTarget = (config: CloudboxConfig, awsHost?: string) =>
   Effect.try({
-    try: () => sshTarget(config, host),
+    try: () => requireSshTransport(config, awsHost),
     catch: (cause) =>
-      cause instanceof AcceptanceError
-        ? cause
-        : acceptanceError("SSH target", "Could not resolve the configured SSH key", cause),
+      acceptanceError(
+        "SSH transport",
+        cause instanceof SshTransportError
+          ? cause.message
+          : "Could not configure the SSH transport",
+        cause,
+      ),
   });
 
-const runSsh = (target: SshTarget, script: string, timeoutMs?: number) =>
+const runSsh = (target: SshTransport, script: string, timeoutMs?: number) =>
   runProcess(
     "ssh",
     [
-      "-i",
-      target.privateKeyPath,
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "StrictHostKeyChecking=accept-new",
-      "-o",
-      "ConnectTimeout=10",
-      "-o",
-      "ServerAliveInterval=10",
-      "-o",
-      "ServerAliveCountMax=3",
-      `${target.user}@${target.host}`,
+      ...target.args({
+        batchMode: true,
+        strictHostKeyChecking: true,
+        connectTimeoutSeconds: 10,
+        serverAliveIntervalSeconds: 10,
+        serverAliveCountMax: 3,
+      }),
       "bash",
       "-s",
     ],
@@ -163,7 +141,7 @@ const evidenceFrom = (output: ProcessOutput): string => {
 };
 
 const remoteCheck = (
-  target: SshTarget,
+  target: SshTransport,
   name: string,
   body: string,
   timeoutMs?: number,
@@ -190,7 +168,7 @@ const remoteCheck = (
   }),
 });
 
-const bootstrapCheck = (target: SshTarget) =>
+const bootstrapCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "bootstrap",
@@ -221,7 +199,7 @@ fi
 printf '%s log_errors=0\\n' "$marker_evidence"`,
   );
 
-const versionsCheck = (target: SshTarget) =>
+const versionsCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "tool versions",
@@ -247,7 +225,7 @@ printf 'pnpm=%s\\n' "$pnpm_version"
 exit "$failed"`,
   );
 
-const zfsCheck = (target: SshTarget) =>
+const zfsCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "zfs tank",
@@ -259,7 +237,7 @@ done
 printf 'pool=tank health=%s datasets=tank/incus,tank/archive\\n' "$health"`,
   );
 
-const incusCheck = (target: SshTarget) =>
+const incusCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "incus",
@@ -272,7 +250,7 @@ const cleanIncusInstance = `cleanup() { incus delete --force accept-ct </dev/nul
 trap cleanup EXIT
 if incus info accept-ct </dev/null >/dev/null 2>&1; then incus delete --force accept-ct </dev/null; fi`;
 
-const containerCheck = (target: SshTarget) =>
+const containerCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "incus container",
@@ -284,7 +262,7 @@ printf '%s\\n' "$uname_output"`,
     300_000,
   );
 
-const vmCheck = (target: SshTarget) =>
+const vmCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "incus vm",
@@ -302,7 +280,7 @@ printf 'kvm=present %s\\n' "$uname_output"`,
     300_000,
   );
 
-const goldenImageCheck = (target: SshTarget) =>
+const goldenImageCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "golden image",
@@ -311,7 +289,7 @@ printf '%s' "$aliases" | jq -e 'type == "array" and any(.[]; .name == "golden")'
 printf 'alias=golden present=true\\n'`,
   );
 
-const t3Check = (target: SshTarget) =>
+const t3Check = (target: SshTransport) =>
   remoteCheck(
     target,
     "t3 server",
@@ -326,7 +304,7 @@ test "$service_state" = active
 printf 'environment=json clients=%s service=%s\\n' "$(printf '%s' "$clients" | jq 'length')" "$service_state"`,
   );
 
-const machinesCliCheck = (target: SshTarget) =>
+const machinesCliCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "machines cli",
@@ -336,7 +314,7 @@ printf '%s' "$machines" | jq -e 'type == "array" or type == "object"' >/dev/null
 printf 'cloudbox-machines=json\\n'`,
   );
 
-const idleTimerCheck = (target: SshTarget) =>
+const idleTimerCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "idle timer",
@@ -345,7 +323,7 @@ test "$state" = active
 printf 'cloudbox-idle.timer=%s\\n' "$state"`,
   );
 
-const dockerCheck = (target: SshTarget) =>
+const dockerCheck = (target: SshTransport) =>
   remoteCheck(
     target,
     "docker",
@@ -355,11 +333,9 @@ printf 'user=%s server=%s\\n' "$(id -un)" "$server_version"`,
   );
 
 export const makeAcceptanceChecks = (
-  config: CloudboxConfig,
-  host: string,
+  target: SshTransport,
   expectVm: boolean,
 ): ReadonlyArray<AcceptanceCheck> => {
-  const target = sshTarget(config, host);
   const checks = [
     bootstrapCheck(target),
     versionsCheck(target),
@@ -380,13 +356,13 @@ export const makeAcceptanceChecks = (
 
 export const runAcceptanceSuite = (
   config: CloudboxConfig,
-  host: string,
+  awsHost: string | undefined,
   expectVm: boolean,
 ) =>
   Effect.gen(function* () {
-    yield* makeSshTarget(config, host);
+    const target = yield* makeSshTarget(config, awsHost);
     const results: Array<VerificationResult> = [];
-    for (const check of makeAcceptanceChecks(config, host, expectVm)) {
+    for (const check of makeAcceptanceChecks(target, expectVm)) {
       results.push(yield* check.run);
     }
     return { ok: results.every((result) => result.pass), results } satisfies VerificationReport;
@@ -418,7 +394,7 @@ const RemoteSleepState = Schema.Struct({
 
 type RemoteSleepState = typeof RemoteSleepState.Type;
 
-const readSleepState = (target: SshTarget, markerPid?: number) =>
+const readSleepState = (target: SshTransport, markerPid?: number) =>
   runSsh(
     target,
     markerPid === undefined
@@ -474,7 +450,7 @@ const waitForProviderState = (
   });
 
 const waitForSshState = (
-  target: SshTarget,
+  target: SshTransport,
   markerPid: number,
   timeoutSeconds: number,
 ) =>
@@ -505,15 +481,21 @@ export const verifySleepRoundtrip = (
     const deadline = startedAt + timeoutSeconds * 1_000;
     const remainingSeconds = () => Math.max(1, Math.ceil((deadline - Date.now()) / 1_000));
     const initial = yield* lifecycle.status;
-    if (!isRunningState(lifecycle.provider, initial.state) || initial.publicIp === undefined) {
+    if (
+      !isRunningState(lifecycle.provider, initial.state) ||
+      (config.provider === "aws" && initial.publicIp === undefined)
+    ) {
       return yield* Effect.fail(
         acceptanceError(
           "verify sleep",
-          `Instance must be running with a public IP; state=${initial.state}`,
+          `Instance must be running${config.provider === "aws" ? " with a public IP" : ""}; state=${initial.state}`,
         ),
       );
     }
-    const initialTarget = yield* makeSshTarget(config, initial.publicIp);
+    const initialTarget = yield* makeSshTarget(
+      config,
+      config.provider === "aws" ? initial.publicIp : undefined,
+    );
     const before = yield* readSleepState(initialTarget);
     yield* lifecycle.sleep;
     const sleeping = yield* waitForProviderState(
@@ -522,12 +504,15 @@ export const verifySleepRoundtrip = (
       remainingSeconds(),
     );
     const running = yield* lifecycle.wake;
-    if (running.publicIp === undefined) {
+    if (config.provider === "aws" && running.publicIp === undefined) {
       return yield* Effect.fail(
-        acceptanceError("verify sleep", "Woken instance has no public IP"),
+        acceptanceError("verify sleep", "Woken AWS instance has no public IP"),
       );
     }
-    const resumedTarget = yield* makeSshTarget(config, running.publicIp);
+    const resumedTarget = yield* makeSshTarget(
+      config,
+      config.provider === "aws" ? running.publicIp : undefined,
+    );
     const after = yield* waitForSshState(
       resumedTarget,
       before.pid,

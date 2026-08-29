@@ -9,7 +9,7 @@ const valid = {
   region: "us-east-1",
   instanceType: "m7i.4xlarge",
   diskGb: 300,
-  sshCidr: "203.0.113.10/32",
+  aws: { sshCidr: "203.0.113.10/32" },
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {
@@ -45,16 +45,38 @@ describe("CloudboxConfig", () => {
     }),
   );
 
+  it.effect("decodes GCP without any SSH CIDR", () =>
+    Effect.gen(function* () {
+      const { aws: _aws, region: _region, instanceType: _instanceType, diskGb: _diskGb, ...shared } = valid;
+      const config = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({
+          ...shared,
+          provider: "gcp",
+          gcp: {
+            project: "cloudbox-project",
+            zone: "us-central1-a",
+            machineType: "n2-standard-16",
+            bootDiskGb: 50,
+            dataDiskGb: 300,
+            dataDiskType: "pd-ssd",
+            credentials: "adc",
+          },
+        }),
+      );
+      expect(config.provider).toBe("gcp");
+      if (config.provider === "gcp") expect(config.gcp.zone).toBe("us-central1-a");
+    }),
+  );
+
   it.effect("hard-fails when required GCP values are missing", () =>
     Effect.gen(function* () {
+      const { aws: _aws, region: _region, instanceType: _instanceType, diskGb: _diskGb, ...shared } = valid;
       const error = yield* parseConfig(
         "cloudbox.json",
         JSON.stringify({
-          ...valid,
+          ...shared,
           provider: "gcp",
-          region: undefined,
-          instanceType: undefined,
-          diskGb: undefined,
           gcp: {
             project: "cloudbox-project",
             zone: "us-central1-a",
@@ -84,14 +106,27 @@ describe("CloudboxConfig", () => {
     }),
   );
 
-  it.effect("refuses an internet-wide SSH CIDR", () =>
+  it.effect("refuses an internet-wide AWS SSH CIDR", () =>
     Effect.gen(function* () {
       const error = yield* parseConfig(
         "cloudbox.json",
-        JSON.stringify({ ...valid, sshCidr: "0.0.0.0/0" }),
+        JSON.stringify({ ...valid, aws: { sshCidr: "0.0.0.0/0" } }),
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("sshCidr");
+    }),
+  );
+
+  it.effect("rejects the legacy top-level SSH CIDR with migration guidance", () =>
+    Effect.gen(function* () {
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...valid, sshCidr: "203.0.113.10/32" }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("top-level sshCidr was removed");
+      expect(error.message).toContain("aws.sshCidr");
+      expect(error.message).toContain("GCP configs do not accept an SSH CIDR");
     }),
   );
 });

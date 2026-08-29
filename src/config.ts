@@ -71,9 +71,12 @@ export const GcpConfig = Schema.Struct({
   credentials: GcpCredentials,
 });
 
+export const AwsConfig = Schema.Struct({
+  sshCidr: SshCidr,
+});
+
 const SharedConfig = {
   name: Schema.NonEmptyString,
-  sshCidr: SshCidr,
   sshPublicKeyPath: Schema.NonEmptyString,
   idleMinutes: PositiveInteger,
   t3: T3Config,
@@ -84,6 +87,7 @@ const SharedConfig = {
 export const AwsCloudboxConfig = Schema.Struct({
   ...SharedConfig,
   provider: Schema.Literal("aws"),
+  aws: AwsConfig,
   region: Schema.NonEmptyString,
   instanceType: Schema.NonEmptyString,
   diskGb: PositiveInteger,
@@ -115,17 +119,48 @@ const decodeConfig = Schema.decodeUnknownEffect(
   { errors: "all", onExcessProperty: "error" },
 );
 
-export const parseConfig = (path: string, contents: string) =>
-  decodeConfig(contents).pipe(
-    Effect.mapError(
-      (cause) =>
-        new ConfigError({
-          path,
-          message: `Invalid ${path}: ${cause.message}`,
-          cause,
-        }),
-    ),
+const rejectLegacySshCidr = (path: string, contents: string) =>
+  Effect.try({
+    try: () => JSON.parse(contents) as unknown,
+    catch: (cause) =>
+      new ConfigError({
+        path,
+        message: `Invalid ${path}: config is not valid JSON`,
+        cause,
+      }),
+  }).pipe(
+    Effect.flatMap((value) => {
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        Object.prototype.hasOwnProperty.call(value, "sshCidr")
+      ) {
+        return Effect.fail(
+          new ConfigError({
+            path,
+            message: `Invalid ${path}: top-level sshCidr was removed; use aws.sshCidr for AWS. GCP configs do not accept an SSH CIDR.`,
+            cause: value,
+          }),
+        );
+      }
+      return Effect.void;
+    }),
   );
+
+export const parseConfig = (path: string, contents: string) =>
+  Effect.gen(function* () {
+    yield* rejectLegacySshCidr(path, contents);
+    return yield* decodeConfig(contents).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ConfigError({
+            path,
+            message: `Invalid ${path}: ${cause.message}`,
+            cause,
+          }),
+      ),
+    );
+  });
 
 export const loadConfig = (path: string) =>
   Effect.gen(function* () {
