@@ -34,7 +34,8 @@ Passive startup and background reconnect never wake paid compute.
 
 When **Thread machines** is enabled, a new thread receives a machine, branch and workspace. The
 agent runs as the user in `/home/dev/ws`, with selected identity and settings mounted from the
-host. Running agents and connected clients keep the host awake.
+host. Running agents and active tool or shell processes keep the host awake; a background-connected
+client does not.
 
 ```mermaid
 stateDiagram-v2

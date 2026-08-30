@@ -1,6 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { detectResumeGrace, IDLE_CHECK_INTERVAL_MS } from "./idle.ts";
+import {
+  detectResumeGrace,
+  IDLE_CHECK_INTERVAL_MS,
+  isAuthenticatedT3Busy,
+} from "./idle.ts";
+
+describe("authenticated T3 activity", () => {
+  it("does not keep the box awake for a background-connected client", () => {
+    expect(
+      isAuthenticatedT3Busy({
+        clients: [{ connected: true }],
+        runningSessions: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the box awake while a thread session is running", () => {
+    expect(
+      isAuthenticatedT3Busy({
+        clients: [],
+        runningSessions: 1,
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("idle resume grace", () => {
   it("detects a wall-clock jump larger than three idle intervals", () => {

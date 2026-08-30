@@ -69,6 +69,13 @@ const IncusInstance = Schema.Struct({
 
 const T3Client = Schema.Struct({ connected: Schema.Boolean });
 
+export const isAuthenticatedT3Busy = ({
+  runningSessions,
+}: {
+  readonly clients: ReadonlyArray<typeof T3Client.Type>;
+  readonly runningSessions: number;
+}): boolean => runningSessions > 0;
+
 export class IdleError extends Data.TaggedError("IdleError")<{
   readonly operation: string;
   readonly message: string;
@@ -218,8 +225,6 @@ const hasAuthenticatedT3Activity = (port: number, activity: AuthenticatedT3Activ
     const clients = yield* Schema.decodeUnknownEffect(
       Schema.fromJsonString(Schema.Array(T3Client)),
     )(clientsJson).pipe(Effect.mapError((cause) => fail("decode active T3 clients", cause)));
-    if (clients.some((client) => client.connected)) return true;
-
     const count = yield* run("sqlite3", [
       "-readonly",
       `${activity.baseDir}/userdata/state.sqlite`,
@@ -228,7 +233,7 @@ const hasAuthenticatedT3Activity = (port: number, activity: AuthenticatedT3Activ
     const running = yield* Schema.decodeUnknownEffect(Schema.NumberFromString)(count.trim()).pipe(
       Effect.mapError((cause) => fail("decode running T3 agent count", cause)),
     );
-    return running > 0;
+    return isAuthenticatedT3Busy({ clients, runningSessions: running });
   }).pipe(Effect.mapError((cause) => fail("authenticated T3 activity detection", cause)));
 
 const hasIncusAgentProcess = Effect.gen(function* () {

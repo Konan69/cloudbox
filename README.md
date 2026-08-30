@@ -260,9 +260,12 @@ The service runs:
 - `/run/cloudbox/keepawake` exists;
 - a Claude, Codex, pi, or OpenCode process is running;
 - the T3 server has a non-infrastructure child process; or
-- TCP port 3773 has an established connection.
+- T3 reports a thread session as starting or running.
 
 The persistent T3-managed `cloudflared` helper is excluded from the child-process test; otherwise merely pairing the relay would prevent hibernation forever. Active relay traffic still appears as an established connection to port 3773.
+An authenticated background client connection is presence, not activity, and does not keep the host
+awake. The legacy AWS bootstrap still uses its TCP-connection fallback until it adopts the
+authenticated session check.
 
 The idle streak is stored in `/var/lib/cloudbox/idle.json`. At `idleMinutes`, AWS gets its instance ID with an IMDSv2 token and calls `StopInstances(Hibernate=true)`. GCP reads project, zone, instance name, and an access token from `metadata.google.internal`, then calls `instances.suspend` on itself. Busy detection is shared.
 
