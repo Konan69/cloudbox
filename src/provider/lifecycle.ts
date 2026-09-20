@@ -9,7 +9,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "../config.ts";
+import type { AwsCloudboxConfig, GcpCloudboxConfig } from "../config.ts";
 import { GcpApi, Operation } from "../gcp/client.ts";
 
 const Ec2StateName = Schema.Literals([
@@ -290,7 +290,9 @@ const makeGcpLifecycle = (config: GcpCloudboxConfig): ProviderLifecycle => {
   };
 };
 
-export const makeProviderLifecycle = (config: CloudboxConfig): ProviderLifecycle =>
+export const makeProviderLifecycle = (
+  config: AwsCloudboxConfig | GcpCloudboxConfig,
+): ProviderLifecycle =>
   config.provider === "aws" ? makeAwsLifecycle(config) : makeGcpLifecycle(config);
 
 export const isSleepingState = (provider: "aws" | "gcp", state: string): boolean => {

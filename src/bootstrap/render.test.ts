@@ -2,10 +2,10 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import { IdleConfig } from "../box/idleConfig.ts";
-import { CloudboxConfig } from "../config.ts";
+import { AwsCloudboxConfig } from "../config.ts";
 import { renderBootstrap, renderUserData } from "./render.ts";
 
-const config = Schema.decodeUnknownSync(CloudboxConfig)({
+const config = Schema.decodeUnknownSync(AwsCloudboxConfig)({
   provider: "aws",
   name: "dev",
   aws: { sshCidr: "203.0.113.10/32" },

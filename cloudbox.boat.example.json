@@ -1,0 +1,57 @@
+{
+  "provider": "boat",
+  "name": "dev",
+  "boat": {
+    "type": "default",
+    "ttlSeconds": 7200,
+    "environment": "base"
+  },
+  "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
+  "idleMinutes": 30,
+  "t3": {
+    "repoUrl": "https://github.com/example/t3code.git",
+    "branch": "main",
+    "settingsParity": {
+      "enabled": true,
+      "keybindings": true
+    }
+  },
+  "identity": {
+    "paths": [
+      "~/.claude/settings.json",
+      "~/.claude/CLAUDE.md",
+      "~/.claude/skills/",
+      "~/.agents/skills/",
+      "~/.claude/projects/-home-dev/memory/",
+      "~/.pi/agent/auth.json",
+      "~/.pi/agent/settings.json",
+      "~/.pi/agents/",
+      "~/.pi/agent/AGENTS.md",
+      "~/.config/gh/"
+    ],
+    "excludes": [
+      "sessions/",
+      "npm/",
+      "git/",
+      "*.jsonl",
+      "pi-debug.log",
+      "cache*"
+    ],
+    "maxTransferMb": 300
+  },
+  "bootstrap": {
+    "paths": [
+      "~/.agents/skills/",
+      "~/.config/gh/",
+      "~/.gitconfig",
+      "~/src/"
+    ],
+    "excludes": [
+      "node_modules/",
+      ".cache/"
+    ],
+    "maxTransferMb": 2000
+  },
+  "repos": [],
+  "boxUser": "user"
+}

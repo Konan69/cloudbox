@@ -223,6 +223,14 @@ export const AwsConfig = Schema.Struct({
   sshCidr: SshCidr,
 });
 
+export const BoatMachineType = Schema.Literals(["small", "default", "large", "xlarge"]);
+
+export const BoatConfig = Schema.Struct({
+  type: BoatMachineType,
+  ttlSeconds: Schema.NullOr(PositiveInteger),
+  environment: Schema.optionalKey(Schema.NonEmptyString),
+});
+
 const SharedConfig = {
   name: Schema.NonEmptyString,
   sshPublicKeyPath: Schema.NonEmptyString,
@@ -251,14 +259,27 @@ export const GcpCloudboxConfig = Schema.Struct({
   wake: WakeConfig,
 });
 
-export const CloudboxConfig = Schema.Union([AwsCloudboxConfig, GcpCloudboxConfig]);
+export const BoatCloudboxConfig = Schema.Struct({
+  ...SharedConfig,
+  boxUser: Schema.Literal("user"),
+  provider: Schema.Literal("boat"),
+  boat: BoatConfig,
+});
+
+export const CloudboxConfig = Schema.Union([
+  AwsCloudboxConfig,
+  GcpCloudboxConfig,
+  BoatCloudboxConfig,
+]);
 
 export type RepoConfig = typeof RepoConfig.Type;
 export type BootstrapConfig = typeof BootstrapConfig.Type;
 export type GcpCredentials = typeof GcpCredentials.Type;
 export type GcpHostConfig = typeof GcpConfig.Type;
+export type BoatHostConfig = typeof BoatConfig.Type;
 export type AwsCloudboxConfig = typeof AwsCloudboxConfig.Type;
 export type GcpCloudboxConfig = typeof GcpCloudboxConfig.Type;
+export type BoatCloudboxConfig = typeof BoatCloudboxConfig.Type;
 export type CloudboxConfig = typeof CloudboxConfig.Type;
 
 export class ConfigError extends Data.TaggedError("ConfigError")<{

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { AwsCloudboxConfig, GcpCloudboxConfig } from "../config.ts";
+import type { AwsCloudboxConfig, BoatCloudboxConfig, GcpCloudboxConfig } from "../config.ts";
 import {
   assertSshPrerequisites,
   buildSshTransport,
@@ -45,6 +45,13 @@ const gcpConfig: GcpCloudboxConfig = {
   wake: { allowedOrigins: ["https://app.example.test"] },
 };
 
+const boatConfig: BoatCloudboxConfig = {
+  ...shared,
+  provider: "boat",
+  boat: { type: "default", ttlSeconds: 7200 },
+  boxUser: "user",
+};
+
 describe("SSH transport", () => {
   it("builds GCP SSH and rsync arguments through IAP by instance name", () => {
     const transport = buildSshTransport(gcpConfig);
@@ -69,6 +76,16 @@ describe("SSH transport", () => {
     expect(args.at(-1)).toBe("dev@203.0.113.20");
     expect(args.join(" ")).not.toContain("ProxyCommand");
     expect(args.join(" ")).not.toContain("UserKnownHostsFile");
+  });
+
+  it("builds direct Boat SSH and rsync arguments for the API-returned machine IP", () => {
+    const transport = buildSshTransport(boatConfig, "2001:db8::40");
+
+    expect(transport.provider).toBe("boat");
+    expect(transport.target).toBe("user@[2001:db8::40]");
+    expect(transport.args().at(-1)).toBe("user@[2001:db8::40]");
+    expect(transport.rsyncRemoteShell()).toContain("cloudbox_boat_known_hosts");
+    expect(transport.rsyncRemoteShell()).not.toContain("ProxyCommand");
   });
 
   it("rejects host overrides for GCP", () => {

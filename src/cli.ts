@@ -6,8 +6,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import { Command, Flag } from "effect/unstable/cli";
+import { Argument, Command, Flag } from "effect/unstable/cli";
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 import { pathToFileURL } from "node:url";
@@ -30,7 +31,22 @@ import {
   runBootstrapClone,
   type BootstrapCloneRunner,
 } from "./bootstrap/clone.ts";
-import type { CloudboxConfig, RepoConfig } from "./config.ts";
+import { BOAT_HOST_PORT, renderBoatBootstrap } from "./boat/bootstrap.ts";
+import {
+  BoatApiError,
+  BoatConfigError,
+  makeBoatClientFromEnvironment,
+  type BoatClientError,
+  type BoatClientShape,
+  type BoatSandbox,
+} from "./boat/client.ts";
+import type {
+  AwsCloudboxConfig,
+  BoatCloudboxConfig,
+  CloudboxConfig,
+  GcpCloudboxConfig,
+  RepoConfig,
+} from "./config.ts";
 import { loadConfig } from "./config.ts";
 import {
   deriveMachineIdentityManifest,
@@ -71,6 +87,7 @@ export class CloudboxCliError extends Data.TaggedError("CloudboxCliError")<{
 }> {}
 
 type BoxInstance = ProviderInstance;
+type InfrastructureCloudboxConfig = AwsCloudboxConfig | GcpCloudboxConfig;
 
 const cliError = (operation: string, message: string, cause?: unknown) =>
   new CloudboxCliError({ ...(cause === undefined ? {} : { cause }), operation, message });
@@ -80,15 +97,26 @@ const requireString = (operation: string, value: unknown) =>
     Effect.mapError((cause) => cliError(operation, `${operation} returned no value`, cause)),
   );
 
+const requireInfrastructureConfig = (config: CloudboxConfig) =>
+  config.provider === "boat"
+    ? Effect.fail(
+        cliError(
+          "provider command",
+          "This command supports AWS and GCP. Use the `cloudbox boat` command group for a Boat config.",
+        ),
+      )
+    : Effect.succeed(config);
+
 const withBox = <A, E, R>(
   effect: (
-    config: CloudboxConfig,
+    config: InfrastructureCloudboxConfig,
     lifecycle: ProviderLifecycle,
     instance: BoxInstance,
   ) => Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
-    const config = yield* loadConfig("cloudbox.json");
+    const loadedConfig = yield* loadConfig("cloudbox.json");
+    const config = yield* requireInfrastructureConfig(loadedConfig);
     const lifecycle = makeProviderLifecycle(config);
     const instance = yield* lifecycle.status;
     return yield* effect(config, lifecycle, instance);
@@ -820,6 +848,43 @@ const runT3SettingsParity = (
     );
   });
 
+const runSyncOverTransport = (
+  config: CloudboxConfig,
+  transport: SshTransport,
+  dryRun: boolean,
+  force: boolean,
+) =>
+  Effect.gen(function* () {
+    const localHome = NodeOs.homedir();
+    yield* runIdentitySync(
+      {
+        paths: config.identity.paths,
+        excludes: config.identity.excludes,
+        maxTransferMb: config.identity.maxTransferMb,
+        localHome,
+        boxUser: config.boxUser,
+        transport,
+        dryRun,
+        force,
+      },
+      liveRsyncRunner,
+      liveIdentityManifestPublisher,
+    );
+    if (dryRun) return;
+    yield* runRepoParity(config.repos, makeLiveRepoSyncOperator(transport)).pipe(
+      Effect.mapError((cause) =>
+        cliError("repository parity", cause.message, cause),
+      ),
+    );
+    if (config.t3.settingsParity.enabled) {
+      yield* runT3SettingsParity(
+        localHome,
+        config.t3.settingsParity.keybindings,
+        transport,
+      );
+    }
+  });
+
 const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag }).pipe(
   Command.withDescription("Push identity, repositories, and filtered T3 settings to the running box."),
   Command.withHandler(({ dryRun, force }) =>
@@ -829,34 +894,7 @@ const syncCommand = Command.make("sync", { dryRun: dryRunFlag, force: forceFlag 
           ? yield* requirePublicIp(instance)
           : undefined;
         const transport = yield* makeSshTransport(config, awsHost);
-        const localHome = NodeOs.homedir();
-        yield* runIdentitySync(
-          {
-            paths: config.identity.paths,
-            excludes: config.identity.excludes,
-            maxTransferMb: config.identity.maxTransferMb,
-            localHome,
-            boxUser: config.boxUser,
-            transport,
-            dryRun,
-            force,
-          },
-          liveRsyncRunner,
-          liveIdentityManifestPublisher,
-        );
-        if (dryRun) return;
-        yield* runRepoParity(config.repos, makeLiveRepoSyncOperator(transport)).pipe(
-          Effect.mapError((cause) =>
-            cliError("repository parity", cause.message, cause),
-          ),
-        );
-        if (config.t3.settingsParity.enabled) {
-          yield* runT3SettingsParity(
-            localHome,
-            config.t3.settingsParity.keybindings,
-            transport,
-          );
-        }
+        yield* runSyncOverTransport(config, transport, dryRun, force);
       }),
     ),
   ),
@@ -880,7 +918,9 @@ const bootstrapCacheIdentity = (config: CloudboxConfig): string =>
   bootstrapCacheSegment(
     config.provider === "aws"
       ? `aws-${config.region}-${config.name}`
-      : `gcp-${config.gcp.project}-${config.gcp.zone}-${config.name}`,
+      : config.provider === "gcp"
+        ? `gcp-${config.gcp.project}-${config.gcp.zone}-${config.name}`
+        : `boat-${config.name}`,
   );
 
 const resolveLocalPath = (path: string): string =>
@@ -900,8 +940,9 @@ const bootstrapConfig = (config: CloudboxConfig, configPath: string) => {
   );
 };
 
-const runningTransport = (config: CloudboxConfig) =>
+const runningTransport = (loadedConfig: CloudboxConfig) =>
   Effect.gen(function* () {
+    const config = yield* requireInfrastructureConfig(loadedConfig);
     yield* checkSshPrerequisites(config);
     const instance = yield* makeProviderLifecycle(config).wake;
     const host = config.provider === "aws" ? yield* requirePublicIp(instance) : undefined;
@@ -941,9 +982,11 @@ const bootstrapCloneCommand = Command.make("bootstrap-clone", {
         sourceConfig.name === destinationConfig.name &&
         (sourceConfig.provider === "aws"
           ? destinationConfig.provider === "aws" && sourceConfig.region === destinationConfig.region
-          : destinationConfig.provider === "gcp" &&
-            sourceConfig.gcp.project === destinationConfig.gcp.project &&
-            sourceConfig.gcp.zone === destinationConfig.gcp.zone);
+          : sourceConfig.provider === "gcp"
+            ? destinationConfig.provider === "gcp" &&
+              sourceConfig.gcp.project === destinationConfig.gcp.project &&
+              sourceConfig.gcp.zone === destinationConfig.gcp.zone
+            : destinationConfig.provider === "boat");
       if (sameBox) {
         return yield* Effect.fail(
           cliError("bootstrap clone", "Source and destination resolve to the same Cloudbox."),
@@ -1070,7 +1113,8 @@ const verifyCommand = Command.make("verify", {
   Command.withDescription("Run the end-to-end host acceptance suite over SSH."),
   Command.withHandler(({ expectVm, host, json }) =>
     Effect.gen(function* () {
-      const config = yield* loadConfig("cloudbox.json");
+      const loadedConfig = yield* loadConfig("cloudbox.json");
+      const config = yield* requireInfrastructureConfig(loadedConfig);
       const report = yield* runAcceptanceSuite(
         config,
         host.length === 0 ? undefined : host,
@@ -1102,7 +1146,8 @@ const smokeThreadCommand = Command.make("smoke-thread", {
   Command.withDescription("Run autonomous pi and Codex agent turns through the remote T3 server."),
   Command.withHandler(({ host, keepProject, machineMode, timeout }) =>
     Effect.gen(function* () {
-      const config = yield* loadConfig("cloudbox.json");
+      const loadedConfig = yield* loadConfig("cloudbox.json");
+      const config = yield* requireInfrastructureConfig(loadedConfig);
       const transport = yield* makeSshThreadSmokeTransport(
         config,
         host.length === 0 ? undefined : host,
@@ -1129,7 +1174,8 @@ const verifySleepCommand = Command.make("verify-sleep", {
   Command.withDescription("Hibernate or suspend, wake, and prove memory survived."),
   Command.withHandler(({ json, timeout }) =>
     Effect.gen(function* () {
-      const config = yield* loadConfig("cloudbox.json");
+      const loadedConfig = yield* loadConfig("cloudbox.json");
+      const config = yield* requireInfrastructureConfig(loadedConfig);
       const report = yield* verifySleepRoundtrip(
         config,
         makeProviderLifecycle(config),
@@ -1147,7 +1193,8 @@ const verifyIdleCommand = Command.make("verify-idle", {
   Command.withDescription("Leave the host untouched and verify automatic idle sleep."),
   Command.withHandler(({ json, timeout }) =>
     Effect.gen(function* () {
-      const config = yield* loadConfig("cloudbox.json");
+      const loadedConfig = yield* loadConfig("cloudbox.json");
+      const config = yield* requireInfrastructureConfig(loadedConfig);
       const report = yield* verifyIdleSleep(
         config,
         makeProviderLifecycle(config),
@@ -1158,9 +1205,399 @@ const verifyIdleCommand = Command.make("verify-idle", {
   ),
 );
 
-export const cloudbox = Command.make("cloudbox").pipe(
-  Command.withDescription("Control and verify one personal Cloudbox machine on AWS or GCP."),
+const boatCliError = (operation: string, cause: BoatClientError | BoatConfigError) =>
+  cliError(
+    operation,
+    cause instanceof BoatApiError
+      ? `${cause.message} (${cause.code}, request ${cause.requestId})`
+      : cause.message,
+    cause,
+  );
+
+const loadBoatConfig = () =>
+  Effect.gen(function* () {
+    const config = yield* loadConfig("cloudbox.json");
+    if (config.provider !== "boat") {
+      return yield* Effect.fail(
+        cliError("Boat config", "cloudbox.json must set provider to \"boat\""),
+      );
+    }
+    return config;
+  });
+
+const makeConfiguredBoatClient = (): Effect.Effect<BoatClientShape, CloudboxCliError> =>
+  makeBoatClientFromEnvironment().pipe(
+    Effect.mapError((cause) => boatCliError("Boat client", cause)),
+  );
+
+const managedBoatName = (config: BoatCloudboxConfig): string => {
+  const full = `cloudbox-${config.name}`;
+  if (full.length <= 120) return full;
+  const suffix = createHash("sha256").update(full).digest("hex").slice(0, 10);
+  return `${full.slice(0, 109)}-${suffix}`;
+};
+
+const boatMachineInput = (config: BoatCloudboxConfig) => ({
+  type: config.boat.type,
+  ttlSeconds: config.boat.ttlSeconds,
+  ...(config.boat.environment === undefined ? {} : { environment: config.boat.environment }),
+});
+
+const boatUpIdempotencyKey = (config: BoatCloudboxConfig): string => {
+  const bodyHash = createHash("sha256")
+    .update(JSON.stringify(boatMachineInput(config)))
+    .digest("hex")
+    .slice(0, 20);
+  return `cloudbox:up:${config.name}:${bodyHash}`;
+};
+
+const findManagedBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
+  Effect.gen(function* () {
+    const name = managedBoatName(config);
+    const matches: BoatSandbox[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 100; page += 1) {
+      const response = yield* client.list(cursor).pipe(
+        Effect.mapError((cause) => boatCliError("Boat list", cause)),
+      );
+      matches.push(...response.sandboxes.filter((sandbox) => sandbox.name === name));
+      if (!response.pageInfo.hasMore) break;
+      if (response.pageInfo.nextCursor === null) {
+        return yield* Effect.fail(
+          cliError("Boat list", "Boat reported more sandboxes without a next cursor"),
+        );
+      }
+      cursor = response.pageInfo.nextCursor;
+      if (page === 99) {
+        return yield* Effect.fail(
+          cliError("Boat list", "Boat sandbox pagination exceeded 100 pages"),
+        );
+      }
+    }
+    if (matches.length > 1) {
+      return yield* Effect.fail(
+        cliError("Boat list", `Found multiple sandboxes named ${name}; refusing to guess`),
+      );
+    }
+    return matches[0];
+  });
+
+const waitForBoat = (
+  client: BoatClientShape,
+  sandboxId: string,
+  desired: "ready" | "archived",
+) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const sandbox = yield* client.get(sandboxId).pipe(
+        Effect.mapError((cause) => boatCliError(`wait for Boat ${desired}`, cause)),
+      );
+      if (
+        desired === "ready"
+          ? sandbox.state === "ready" || sandbox.state === "idle" || sandbox.state === "running"
+          : sandbox.state === "archived"
+      ) {
+        return sandbox;
+      }
+      if (sandbox.state === "error") {
+        return yield* Effect.fail(
+          cliError(`wait for Boat ${desired}`, `Sandbox ${sandboxId} entered error state`),
+        );
+      }
+      yield* Effect.sleep("2 seconds");
+    }
+    return yield* Effect.fail(
+      cliError(`wait for Boat ${desired}`, `Sandbox ${sandboxId} did not become ${desired} in 10 minutes`),
+    );
+  });
+
+const readBoatPublicKey = (config: BoatCloudboxConfig) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = resolveLocalPath(config.sshPublicKeyPath);
+    const key = yield* fs.readFileString(path).pipe(
+      Effect.mapError((cause) =>
+        cliError("Boat SSH key", `Cannot read sshPublicKeyPath ${config.sshPublicKeyPath}`, cause),
+      ),
+    );
+    return yield* requireString("Boat SSH public key", key.trim());
+  });
+
+const configureBoatTransport = (
+  client: BoatClientShape,
+  config: BoatCloudboxConfig,
+  sandboxId: string,
+) =>
+  Effect.gen(function* () {
+    const publicKey = yield* readBoatPublicKey(config);
+    const configured = yield* client.configureSshKey(sandboxId, publicKey).pipe(
+      Effect.mapError((cause) => boatCliError("Boat SSH key", cause)),
+    );
+    if (!configured.success || configured.machineIp === null) {
+      return yield* Effect.fail(
+        cliError("Boat SSH key", "Boat did not return a machine IP after configuring SSH"),
+      );
+    }
+    const transport = yield* makeSshTransport(config, configured.machineIp);
+    yield* waitForSsh(transport);
+    return transport;
+  });
+
+const requireManagedBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
+  Effect.gen(function* () {
+    const sandbox = yield* findManagedBoat(client, config);
+    if (sandbox === undefined) {
+      return yield* Effect.fail(
+        cliError("Boat sandbox", `No sandbox named ${managedBoatName(config)}; run cloudbox boat up`),
+      );
+    }
+    return sandbox;
+  });
+
+const requireRunningBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
+  Effect.gen(function* () {
+    const sandbox = yield* requireManagedBoat(client, config);
+    if (sandbox.state === "archived") {
+      return yield* Effect.fail(
+        cliError("Boat sandbox", `Sandbox ${sandbox.id} is archived; run cloudbox boat resume`),
+      );
+    }
+    return yield* waitForBoat(client, sandbox.id, "ready");
+  });
+
+const boatUpCommand = Command.make("up", { force: forceFlag }).pipe(
+  Command.withDescription("Create or resume the Boat sandbox, bootstrap T3, sync identity, and print its HTTPS URL."),
+  Command.withHandler(({ force }) =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      let sandbox = yield* findManagedBoat(client, config);
+      if (sandbox === undefined) {
+        const limits = yield* client.limits.pipe(
+          Effect.mapError((cause) => boatCliError("Boat limits", cause)),
+        );
+        if (!limits.canStart) {
+          return yield* Effect.fail(
+            cliError(
+              "Boat up",
+              `Boat cannot start a sandbox: ${limits.startBlockedReason ?? limits.billingStatus}`,
+            ),
+          );
+        }
+        const created = yield* client.create({
+          ...boatMachineInput(config),
+          idempotencyKey: boatUpIdempotencyKey(config),
+        }).pipe(Effect.mapError((cause) => boatCliError("Boat create", cause)));
+        sandbox = yield* client.updateName(created.sandbox.id, managedBoatName(config)).pipe(
+          Effect.mapError((cause) => boatCliError("Boat name", cause)),
+        );
+      } else if (sandbox.state === "archived") {
+        yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
+          Effect.mapError((cause) => boatCliError("Boat resume", cause)),
+        );
+      } else if (sandbox.state === "archiving") {
+        return yield* Effect.fail(
+          cliError("Boat up", `Sandbox ${sandbox.id} is still archiving; retry after status is archived`),
+        );
+      }
+
+      sandbox = yield* waitForBoat(client, sandbox.id, "ready");
+      yield* client.updateTtl(sandbox.id, config.boat.ttlSeconds).pipe(
+        Effect.mapError((cause) => boatCliError("Boat TTL", cause)),
+      );
+      const transport = yield* configureBoatTransport(client, config, sandbox.id);
+      yield* runCapturedProcess(
+        "ssh",
+        [...transport.args({ batchMode: true }), "bash", "-s"],
+        renderBoatBootstrap(config),
+      );
+      yield* runSyncOverTransport(config, transport, false, force);
+      yield* runCapturedProcess("ssh", [
+        ...transport.args({ batchMode: true }),
+        "systemctl",
+        "--user",
+        "restart",
+        "t3code-fork.service",
+      ]);
+      const hosted = yield* client.host(sandbox.id, {
+        port: BOAT_HOST_PORT,
+        title: `Cloudbox ${config.name} · T3 Code`,
+      }).pipe(Effect.mapError((cause) => boatCliError("Boat host", cause)));
+      yield* Console.log(hosted.url);
+    }),
+  ),
+);
+
+const boatStatusCommand = Command.make("status").pipe(
+  Command.withDescription("Show Boat account limits and the managed sandbox state."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const limits = yield* client.limits.pipe(
+        Effect.mapError((cause) => boatCliError("Boat limits", cause)),
+      );
+      const sandbox = yield* findManagedBoat(client, config);
+      yield* Console.log(JSON.stringify({ limits, sandbox: sandbox ?? null }, null, 2));
+    }),
+  ),
+);
+
+const boatStopCommand = Command.make("stop").pipe(
+  Command.withDescription("Snapshot and archive the managed Boat sandbox."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const sandbox = yield* requireManagedBoat(client, config);
+      if (sandbox.state !== "archived") {
+        yield* client.stop(sandbox.id).pipe(
+          Effect.mapError((cause) => boatCliError("Boat stop", cause)),
+        );
+      }
+      const archived = yield* waitForBoat(client, sandbox.id, "archived");
+      yield* Console.log(JSON.stringify(archived, null, 2));
+    }),
+  ),
+);
+
+const boatResumeCommand = Command.make("resume").pipe(
+  Command.withDescription("Resume the managed Boat sandbox using the configured machine type and TTL."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const sandbox = yield* requireManagedBoat(client, config);
+      if (sandbox.state === "archived") {
+        yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
+          Effect.mapError((cause) => boatCliError("Boat resume", cause)),
+        );
+      }
+      const ready = yield* waitForBoat(client, sandbox.id, "ready");
+      const transport = yield* configureBoatTransport(client, config, ready.id);
+      yield* Console.log(JSON.stringify({ sandbox: ready, sshHost: transport.host }, null, 2));
+    }),
+  ),
+);
+
+const boatForkCommand = Command.make("fork").pipe(
+  Command.withDescription("Fork the managed sandbox with the configured machine type and TTL."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const source = yield* requireManagedBoat(client, config);
+      const forked = yield* client.fork(source.id, {
+        ...boatMachineInput(config),
+        idempotencyKey: `cloudbox:fork:${randomUUID()}`,
+      }).pipe(Effect.mapError((cause) => boatCliError("Boat fork", cause)));
+      const ready = yield* waitForBoat(client, forked.id, "ready");
+      const transport = yield* configureBoatTransport(client, config, ready.id);
+      const hosted = yield* client.host(ready.id, {
+        port: BOAT_HOST_PORT,
+        title: `Cloudbox ${config.name} fork · T3 Code`,
+      }).pipe(Effect.mapError((cause) => boatCliError("Boat host fork", cause)));
+      yield* Console.log(JSON.stringify({ sandbox: ready, sshHost: transport.host, url: hosted.url }, null, 2));
+    }),
+  ),
+);
+
+const boatSshCommand = Command.make("ssh").pipe(
+  Command.withDescription("Open an interactive SSH session to the managed Boat sandbox."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const sandbox = yield* requireRunningBoat(client, config);
+      const transport = yield* configureBoatTransport(client, config, sandbox.id);
+      yield* runProcess("ssh", transport.args());
+    }),
+  ),
+);
+
+const boatExecCommand = Command.make("exec", {
+  command: Argument.string("command"),
+  timeout: Flag.integer("timeout").pipe(
+    Flag.withDefault(600),
+    Flag.withDescription("Synchronous timeout in seconds (1-600)."),
+  ),
+  detached: Flag.boolean("detached").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription("Run detached and poll until the command exits."),
+  ),
+}).pipe(
+  Command.withDescription("Execute a command in the managed Boat sandbox."),
+  Command.withHandler(({ command, detached, timeout }) =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const sandbox = yield* requireRunningBoat(client, config);
+      const result = detached
+        ? yield* client.execDetachedAndWait(sandbox.id, { command }).pipe(
+            Effect.mapError((cause) => boatCliError("Boat detached exec", cause)),
+          )
+        : yield* client.exec(sandbox.id, { command, timeoutSeconds: timeout }).pipe(
+            Effect.mapError((cause) => boatCliError("Boat exec", cause)),
+          );
+      yield* Effect.sync(() => {
+        process.stdout.write(result.stdout);
+        process.stderr.write(result.stderr);
+      });
+      if (result.exitCode !== 0) {
+        return yield* Effect.fail(
+          cliError("Boat exec", `Command exited with status ${String(result.exitCode)}`),
+        );
+      }
+    }),
+  ),
+);
+
+const boatHostCommand = Command.make("host", {
+  port: Flag.integer("port").pipe(
+    Flag.withDefault(BOAT_HOST_PORT),
+    Flag.withDescription("Sandbox port to expose (default: the T3 hosting proxy)."),
+  ),
+  title: Flag.string("title").pipe(
+    Flag.withDefault("T3 Code"),
+    Flag.withDescription("Display title for the hosted port."),
+  ),
+  publicAccess: Flag.boolean("public").pipe(
+    Flag.withDefault(false),
+    Flag.withDescription("Create an ungated URL instead of a token-protected URL."),
+  ),
+}).pipe(
+  Command.withDescription("Expose a running Boat sandbox port on a stable HTTPS URL."),
+  Command.withHandler(({ port, publicAccess, title }) =>
+    Effect.gen(function* () {
+      const config = yield* loadBoatConfig();
+      const client = yield* makeConfiguredBoatClient();
+      const sandbox = yield* requireRunningBoat(client, config);
+      const hosted = yield* client.host(sandbox.id, { port, public: publicAccess, title }).pipe(
+        Effect.mapError((cause) => boatCliError("Boat host", cause)),
+      );
+      yield* Console.log(hosted.url);
+    }),
+  ),
+);
+
+const boatCommand = Command.make("boat").pipe(
+  Command.withDescription("Provision and operate the Boat provider lane."),
   Command.withSubcommands([
+    boatUpCommand,
+    boatStatusCommand,
+    boatStopCommand,
+    boatResumeCommand,
+    boatForkCommand,
+    boatSshCommand,
+    boatExecCommand,
+    boatHostCommand,
+  ]),
+);
+
+export const cloudbox = Command.make("cloudbox").pipe(
+  Command.withDescription("Control and verify one personal Cloudbox machine on AWS, GCP, or Boat."),
+  Command.withSubcommands([
+    boatCommand,
     statusCommand,
     wakeCommand,
     sleepCommand,

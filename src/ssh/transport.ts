@@ -20,7 +20,7 @@ export interface SshArgsOptions {
 }
 
 export interface SshTransport {
-  readonly provider: "aws" | "gcp";
+  readonly provider: "aws" | "gcp" | "boat";
   readonly host: string;
   readonly target: string;
   readonly privateKeyPath: string;
@@ -65,9 +65,14 @@ const buildOptions = (
         ...sshOption("UserKnownHostsFile=~/.ssh/cloudbox_known_hosts"),
         ...sshOption("StrictHostKeyChecking=accept-new"),
       ]
-    : options.strictHostKeyChecking === true
-      ? sshOption("StrictHostKeyChecking=accept-new")
-      : []),
+    : config.provider === "boat"
+      ? [
+          ...sshOption("UserKnownHostsFile=~/.ssh/cloudbox_boat_known_hosts"),
+          ...sshOption("StrictHostKeyChecking=accept-new"),
+        ]
+      : options.strictHostKeyChecking === true
+        ? sshOption("StrictHostKeyChecking=accept-new")
+        : []),
   ...(options.batchMode === true ? sshOption("BatchMode=yes") : []),
   ...(options.connectTimeoutSeconds === undefined
     ? []
@@ -87,22 +92,28 @@ const shellQuote = (value: string): string =>
 
 export const buildSshTransport = (
   config: CloudboxConfig,
-  awsHost?: string,
+  directHost?: string,
 ): SshTransport => {
-  if (config.provider === "gcp" && awsHost !== undefined) {
+  if (config.provider === "gcp" && directHost !== undefined) {
     throw new SshTransportError({
       message: `--host is AWS-only; GCP SSH uses instance name ${gcpInstanceName(config)} through IAP`,
     });
   }
-  if (config.provider === "aws" && (awsHost === undefined || awsHost.trim().length === 0)) {
+  if (
+    config.provider !== "gcp" &&
+    (directHost === undefined || directHost.trim().length === 0)
+  ) {
     throw new SshTransportError({
-      message: "AWS SSH requires a public IP or hostname via --host",
+      message: config.provider === "aws"
+        ? "AWS SSH requires a public IP or hostname via --host"
+        : "Boat SSH requires the machine IP returned by the SSH-key API",
     });
   }
 
-  const host = config.provider === "gcp" ? gcpInstanceName(config) : awsHost!.trim();
+  const host = config.provider === "gcp" ? gcpInstanceName(config) : directHost!.trim();
   const privateKeyPath = privateKeyPathFromConfig(config.sshPublicKeyPath);
-  const target = `${config.boxUser}@${host}`;
+  const sshHost = host.includes(":") ? `[${host}]` : host;
+  const target = `${config.boxUser}@${sshHost}`;
   const optionsFor = (options: SshArgsOptions = {}) =>
     buildOptions(config, privateKeyPath, options);
 

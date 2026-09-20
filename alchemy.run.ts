@@ -17,7 +17,7 @@ import * as NodePath from "node:path";
 
 import { renderFetchWrapper, renderHostBootstrap } from "./src/bootstrap/render-host.ts";
 import { renderUserData } from "./src/bootstrap/render.ts";
-import type { AwsCloudboxConfig, CloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
+import type { AwsCloudboxConfig, GcpCloudboxConfig } from "./src/config.ts";
 import { loadConfig } from "./src/config.ts";
 import { guardProviderChange } from "./src/deployment/providerGuard.ts";
 import * as GCP from "./src/gcp/index.ts";
@@ -41,7 +41,7 @@ const gcpBucketName = (config: GcpCloudboxConfig, purpose: string): string =>
 const gcpWakeServiceName = (config: GcpCloudboxConfig): string =>
   `cloudbox-${config.name.slice(0, 24)}-wake-${shortHash(`${config.gcp.project}:${config.name}:service`).slice(0, 8)}`;
 
-const deploymentInputs = (config: CloudboxConfig) =>
+const deploymentInputs = (config: AwsCloudboxConfig | GcpCloudboxConfig) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const readInput = (path: string, buildCommand: string) =>
@@ -589,7 +589,11 @@ export default Alchemy.Stack(
   "Cloudbox",
   { providers: cloudProviders, state: Alchemy.localState() },
   Effect.gen(function* () {
-    const config = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
+    const loadedConfig = yield* loadConfig("cloudbox.json").pipe(Effect.orDie);
+    if (loadedConfig.provider === "boat") {
+      return yield* Effect.die("Boat is managed by `cloudbox boat`; Alchemy deploy supports only AWS and GCP.");
+    }
+    const config = loadedConfig;
     yield* Effect.tryPromise({
       try: () => guardProviderChange(config.provider),
       catch: (cause) =>

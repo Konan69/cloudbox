@@ -55,6 +55,23 @@ const validGcp = {
   boxUser: valid.boxUser,
 };
 
+const validBoat = {
+  provider: "boat" as const,
+  name: valid.name,
+  boat: {
+    type: "xlarge" as const,
+    ttlSeconds: null,
+    environment: "base",
+  },
+  sshPublicKeyPath: valid.sshPublicKeyPath,
+  idleMinutes: valid.idleMinutes,
+  t3: valid.t3,
+  identity: valid.identity,
+  bootstrap: valid.bootstrap,
+  repos: valid.repos,
+  boxUser: "user" as const,
+};
+
 describe("CloudboxConfig", () => {
   it.effect("decodes a complete config", () =>
     Effect.gen(function* () {
@@ -97,6 +114,47 @@ describe("CloudboxConfig", () => {
       ).pipe(Effect.flip);
       expect(error).toBeInstanceOf(ConfigError);
       expect(error.message).toContain("credentials");
+    }),
+  );
+
+  it.effect("decodes the Boat provider with explicit size, TTL, and environment", () =>
+    Effect.gen(function* () {
+      const config = yield* parseConfig("cloudbox.json", JSON.stringify(validBoat));
+      expect(config.provider).toBe("boat");
+      if (config.provider === "boat") {
+        expect(config.boat).toEqual({ type: "xlarge", ttlSeconds: null, environment: "base" });
+        expect(config.boxUser).toBe("user");
+      }
+    }),
+  );
+
+  it.effect("accepts a positive Boat TTL and rejects zero", () =>
+    Effect.gen(function* () {
+      const finite = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...validBoat, boat: { type: "default", ttlSeconds: 7200 } }),
+      );
+      expect(finite.provider).toBe("boat");
+
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({ ...validBoat, boat: { type: "small", ttlSeconds: 0 } }),
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("ttlSeconds");
+    }),
+  );
+
+  it.effect("keeps Boat-only fields out of AWS and GCP configs", () =>
+    Effect.gen(function* () {
+      for (const config of [
+        { ...valid, boat: validBoat.boat },
+        { ...validGcp, boat: validBoat.boat },
+      ]) {
+        const error = yield* parseConfig("cloudbox.json", JSON.stringify(config)).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(ConfigError);
+        expect(error.message).toContain("boat");
+      }
     }),
   );
 

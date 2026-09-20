@@ -1,10 +1,10 @@
 import { gzipSync } from "node:zlib";
 
-import type { CloudboxConfig } from "../config.ts";
+import type { AwsCloudboxConfig, GcpCloudboxConfig } from "../config.ts";
 import { encodeIdleConfig } from "../box/idleConfig.ts";
 
 export interface BootstrapInput {
-  readonly config: CloudboxConfig;
+  readonly config: AwsCloudboxConfig | GcpCloudboxConfig;
   readonly sshPublicKey: string;
   readonly idleBundle: string;
 }
