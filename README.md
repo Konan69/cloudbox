@@ -3,7 +3,7 @@
 Read the [product description](docs/product-description.md) for the user-visible lifecycle,
 selective loadout behavior, provisioning/upgrade boundary, mobile support, and verified gaps.
 
-One personal AWS EC2 or Google Compute Engine development machine for dev. It runs the patched T3 Code fork headlessly, suspends after sustained inactivity, and is controlled from a laptop with an Effect CLI.
+One personal AWS EC2, Google Compute Engine, or boat.dev development machine for dev. It runs the patched T3 Code fork headlessly and is controlled from a laptop with an Effect CLI. AWS/GCP use the existing infrastructure lane; Boat uses the `cloudbox boat` command group.
 
 ## What it creates
 
@@ -84,6 +84,21 @@ The stack also creates `cloudbox-wake@<project>.iam.gserviceaccount.com`, a proj
 
 GCE suspend preserves memory, but supports only instances with at most 208 GB RAM and no GPU. A suspended instance is automatically terminated after 60 days. In-guest suspend commands are ignored by GCE; Cloudbox calls `instances.suspend` through the Compute API. The external IP may change after resume.
 
+## Boat provider
+
+Boat is CLI-managed and does not use Alchemy. It creates or resumes one named sandbox, configures the existing SSH public key, builds the patched T3 fork, installs an enabled `systemd --user` service, pushes the normal Cloudbox identity/repository/settings loadout over SSH, and exposes T3 through a protected Boat HTTPS URL.
+
+```bash
+cp cloudbox.boat.example.json cloudbox.json
+export BOAT_API_KEY='<account service API key>'
+pnpm build:cli
+pnpm cloudbox boat up
+```
+
+`boat up` is the complete first-run command after configuration. It prints the token-bearing HTTPS URL. See [docs/boat-provider.md](docs/boat-provider.md) for lifecycle commands, limits, and the loopback hosting proxy.
+
+Boat snapshots files and enabled services, not RAM or hand-run processes. Its TTL counts from machine start rather than last activity; `idleMinutes` remains part of the shared config but does not control Boat auto-stop.
+
 ## Configure
 
 ```bash
@@ -92,7 +107,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required. There are no provider defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`. The optional `bootstrap` block allowlists paths that this box may send or receive during a box-to-box bootstrap:
+Every field for the selected provider is required unless marked optional. There are no provider defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Boat requires `boat.type` and `boat.ttlSeconds`; `boat.environment` is optional, and Boat's SSH user is `user`. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`. The optional `bootstrap` block allowlists paths that this box may send or receive during a box-to-box bootstrap:
 
 ```json
 {
@@ -157,7 +172,7 @@ pnpm cloudbox --help
 
 `dist/idle.mjs` and `dist/machines.mjs` are minified, self-contained host bundles. Tests copy them to an empty temporary directory and run each bundle's `--help` entry point without `node_modules`. GCP uploads those bundles and the rendered inner bootstrap as content-addressed objects in a private assets bucket; instance metadata contains only a sub-4 KiB authenticated fetch-and-verify wrapper. EC2 uses the smaller `dist/idle-aws.mjs` plus pinned Effect runtime packages to remain below its 16 KiB user-data limit. The laptop CLI is bundled to `dist/cli.mjs`; the Cloud Run source archive contains the self-contained `dist/wake-service.mjs` bundle.
 
-## First run
+## First AWS/GCP run
 
 1. Build and deploy:
 
