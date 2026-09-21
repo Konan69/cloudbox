@@ -6,11 +6,9 @@
     "ttlSeconds": 7200,
     "environment": "base"
   },
-  "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
+  "sshPublicKeyPath": "~/.ssh/ascii_box_ed25519.pub",
   "idleMinutes": 30,
   "t3": {
-    "repoUrl": "https://github.com/example/t3code.git",
-    "branch": "main",
     "settingsParity": {
       "enabled": true,
       "keybindings": true
@@ -38,19 +36,6 @@
       "cache*"
     ],
     "maxTransferMb": 300
-  },
-  "bootstrap": {
-    "paths": [
-      "~/.agents/skills/",
-      "~/.config/gh/",
-      "~/.gitconfig",
-      "~/src/"
-    ],
-    "excludes": [
-      "node_modules/",
-      ".cache/"
-    ],
-    "maxTransferMb": 2000
   },
   "repos": [],
   "boxUser": "user"

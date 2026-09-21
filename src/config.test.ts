@@ -65,7 +65,7 @@ const validBoat = {
   },
   sshPublicKeyPath: valid.sshPublicKeyPath,
   idleMinutes: valid.idleMinutes,
-  t3: valid.t3,
+  t3: { settingsParity: valid.t3.settingsParity },
   identity: valid.identity,
   bootstrap: valid.bootstrap,
   repos: valid.repos,
@@ -123,8 +123,28 @@ describe("CloudboxConfig", () => {
       expect(config.provider).toBe("boat");
       if (config.provider === "boat") {
         expect(config.boat).toEqual({ type: "xlarge", ttlSeconds: null, environment: "base" });
+        expect(config.t3).toEqual({ settingsParity: { enabled: true, keybindings: true } });
         expect(config.boxUser).toBe("user");
       }
+    }),
+  );
+
+  it.effect("rejects T3 build inputs from the stock Boat sandbox config", () =>
+    Effect.gen(function* () {
+      const error = yield* parseConfig(
+        "cloudbox.json",
+        JSON.stringify({
+          ...validBoat,
+          t3: {
+            ...validBoat.t3,
+            repoUrl: "https://github.com/example/t3code.git",
+            branch: "main",
+          },
+        }),
+      ).pipe(Effect.flip);
+
+      expect(error).toBeInstanceOf(ConfigError);
+      expect(error.message).toContain("repoUrl");
     }),
   );
 

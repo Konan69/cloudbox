@@ -31,7 +31,6 @@ import {
   runBootstrapClone,
   type BootstrapCloneRunner,
 } from "./bootstrap/clone.ts";
-import { BOAT_HOST_PORT, renderBoatBootstrap } from "./boat/bootstrap.ts";
 import {
   BoatApiError,
   BoatConfigError,
@@ -40,6 +39,14 @@ import {
   type BoatClientShape,
   type BoatSandbox,
 } from "./boat/client.ts";
+import {
+  BOAT_WINDOWS_IDENTITY,
+  BoatSshConfigError,
+  BoatSshProxyError,
+  renderBoatWindowsSshBlock,
+  runBoatSshProxy,
+  updateBoatManagedSshConfig,
+} from "./boat/ssh.ts";
 import type {
   AwsCloudboxConfig,
   BoatCloudboxConfig,
@@ -853,6 +860,7 @@ const runSyncOverTransport = (
   transport: SshTransport,
   dryRun: boolean,
   force: boolean,
+  publishMachineIdentity = true,
 ) =>
   Effect.gen(function* () {
     const localHome = NodeOs.homedir();
@@ -868,7 +876,7 @@ const runSyncOverTransport = (
         force,
       },
       liveRsyncRunner,
-      liveIdentityManifestPublisher,
+      publishMachineIdentity ? liveIdentityManifestPublisher : () => Effect.void,
     );
     if (dryRun) return;
     yield* runRepoParity(config.repos, makeLiveRepoSyncOperator(transport)).pipe(
@@ -1290,8 +1298,16 @@ const waitForBoat = (
   Effect.gen(function* () {
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const sandbox = yield* client.get(sandboxId).pipe(
+        Effect.catchIf(
+          (cause) => cause instanceof BoatApiError && cause.code === "boat_restoring",
+          () => Effect.succeed(undefined),
+        ),
         Effect.mapError((cause) => boatCliError(`wait for Boat ${desired}`, cause)),
       );
+      if (sandbox === undefined) {
+        yield* Effect.sleep("2 seconds");
+        continue;
+      }
       if (
         desired === "ready"
           ? sandbox.state === "ready" || sandbox.state === "idle" || sandbox.state === "running"
@@ -1354,19 +1370,123 @@ const requireManagedBoat = (client: BoatClientShape, config: BoatCloudboxConfig)
     return sandbox;
   });
 
-const requireRunningBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
+const ensureRunningBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
   Effect.gen(function* () {
-    const sandbox = yield* requireManagedBoat(client, config);
+    let sandbox = yield* requireManagedBoat(client, config);
+    if (sandbox.state === "archiving") {
+      sandbox = yield* waitForBoat(client, sandbox.id, "archived");
+    }
     if (sandbox.state === "archived") {
-      return yield* Effect.fail(
-        cliError("Boat sandbox", `Sandbox ${sandbox.id} is archived; run cloudbox boat resume`),
+      yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
+        Effect.mapError((cause) => boatCliError("Boat resume", cause)),
       );
     }
     return yield* waitForBoat(client, sandbox.id, "ready");
   });
 
+interface BoatWindowsSshConfigResult {
+  readonly alias: string;
+  readonly configPath: string;
+}
+
+const writeBoatWindowsSshConfig = (
+  config: BoatCloudboxConfig,
+): Effect.Effect<BoatWindowsSshConfigResult, CloudboxCliError, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const windowsUser = process.env.CLOUDBOX_WINDOWS_USER?.trim() || NodeOs.userInfo().username;
+    const windowsHome = NodePath.join("/mnt/c/Users", windowsUser);
+    const sshDirectory = NodePath.join(windowsHome, ".ssh");
+    const privateKeyPath = NodePath.join(sshDirectory, "ascii_box_ed25519");
+    const publicKeyPath = `${privateKeyPath}.pub`;
+    const expectedWslPublicKey = NodePath.join(NodeOs.homedir(), ".ssh", "ascii_box_ed25519.pub");
+    const configuredPublicKeyPath = resolveLocalPath(config.sshPublicKeyPath);
+    if (configuredPublicKeyPath !== expectedWslPublicKey) {
+      return yield* Effect.fail(
+        cliError(
+          "Boat Windows SSH config",
+          `sshPublicKeyPath must be ~/.ssh/ascii_box_ed25519.pub, the Boat CLI key documented for WSL`,
+        ),
+      );
+    }
+    for (const path of [privateKeyPath, publicKeyPath]) {
+      const exists = yield* fs.exists(path).pipe(
+        Effect.mapError((cause) =>
+          cliError("Boat Windows SSH config", `Could not inspect SSH key ${path}`, cause),
+        ),
+      );
+      if (!exists) {
+        return yield* Effect.fail(
+          cliError(
+            "Boat Windows SSH config",
+            `Missing Windows OpenSSH key ${path}; create ${BOAT_WINDOWS_IDENTITY} in C:\\Users\\${windowsUser}\\.ssh before running boat up`,
+          ),
+        );
+      }
+    }
+
+    const distribution = process.env.WSL_DISTRO_NAME?.trim();
+    if (distribution === undefined || distribution.length === 0) {
+      return yield* Effect.fail(
+        cliError("Boat Windows SSH config", "WSL_DISTRO_NAME is required to write the Windows ProxyCommand"),
+      );
+    }
+    const cliPath = process.argv[1] === undefined ? "" : NodePath.resolve(process.argv[1]);
+    if (NodePath.basename(cliPath) !== "cli.mjs") {
+      return yield* Effect.fail(
+        cliError(
+          "Boat Windows SSH config",
+          "boat up must run the built CLI; run pnpm build:cli, then pnpm cloudbox boat up",
+        ),
+      );
+    }
+    const workingDirectory = process.cwd();
+    const block = renderBoatWindowsSshBlock({
+      name: config.name,
+      distribution,
+      workingDirectory,
+      nodePath: process.execPath,
+      cliPath,
+    });
+    const configPath = NodePath.join(sshDirectory, "config");
+    yield* fs.makeDirectory(sshDirectory, { recursive: true }).pipe(
+      Effect.mapError((cause) =>
+        cliError("Boat Windows SSH config", `Could not create ${sshDirectory}`, cause),
+      ),
+    );
+    const exists = yield* fs.exists(configPath).pipe(
+      Effect.mapError((cause) =>
+        cliError("Boat Windows SSH config", `Could not inspect ${configPath}`, cause),
+      ),
+    );
+    const existing = exists
+      ? yield* fs.readFileString(configPath).pipe(
+          Effect.mapError((cause) =>
+            cliError("Boat Windows SSH config", `Could not read ${configPath}`, cause),
+          ),
+        )
+      : "";
+    const updated = yield* Effect.try({
+      try: () => updateBoatManagedSshConfig(existing, config.name, block),
+      catch: (cause) =>
+        cliError(
+          "Boat Windows SSH config",
+          cause instanceof BoatSshConfigError ? cause.message : `Could not update ${configPath}`,
+          cause,
+        ),
+    });
+    const temporary = NodePath.join(sshDirectory, `.config.cloudbox-${randomUUID()}.tmp`);
+    yield* fs.writeFileString(temporary, updated).pipe(
+      Effect.flatMap(() => fs.rename(temporary, configPath)),
+      Effect.mapError((cause) =>
+        cliError("Boat Windows SSH config", `Could not atomically write ${configPath}`, cause),
+      ),
+    );
+    return { alias: `cloudbox-${config.name}`, configPath };
+  });
+
 const boatUpCommand = Command.make("up", { force: forceFlag }).pipe(
-  Command.withDescription("Create or resume the Boat sandbox, bootstrap T3, sync identity, and print its HTTPS URL."),
+  Command.withDescription("Create or resume the Boat sandbox, sync its loadout, and write the Windows SSH environment."),
   Command.withHandler(({ force }) =>
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
@@ -1391,14 +1511,15 @@ const boatUpCommand = Command.make("up", { force: forceFlag }).pipe(
         sandbox = yield* client.updateName(created.sandbox.id, managedBoatName(config)).pipe(
           Effect.mapError((cause) => boatCliError("Boat name", cause)),
         );
-      } else if (sandbox.state === "archived") {
-        yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
-          Effect.mapError((cause) => boatCliError("Boat resume", cause)),
-        );
-      } else if (sandbox.state === "archiving") {
-        return yield* Effect.fail(
-          cliError("Boat up", `Sandbox ${sandbox.id} is still archiving; retry after status is archived`),
-        );
+      } else {
+        if (sandbox.state === "archiving") {
+          sandbox = yield* waitForBoat(client, sandbox.id, "archived");
+        }
+        if (sandbox.state === "archived") {
+          yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
+            Effect.mapError((cause) => boatCliError("Boat resume", cause)),
+          );
+        }
       }
 
       sandbox = yield* waitForBoat(client, sandbox.id, "ready");
@@ -1406,24 +1527,11 @@ const boatUpCommand = Command.make("up", { force: forceFlag }).pipe(
         Effect.mapError((cause) => boatCliError("Boat TTL", cause)),
       );
       const transport = yield* configureBoatTransport(client, config, sandbox.id);
-      yield* runCapturedProcess(
-        "ssh",
-        [...transport.args({ batchMode: true }), "bash", "-s"],
-        renderBoatBootstrap(config),
+      yield* runSyncOverTransport(config, transport, false, force, false);
+      const sshConfig = yield* writeBoatWindowsSshConfig(config);
+      yield* Console.log(
+        `Boat sandbox ready. Windows SSH config updated: ${sshConfig.configPath}\nT3 SSH environment: ${sshConfig.alias}`,
       );
-      yield* runSyncOverTransport(config, transport, false, force);
-      yield* runCapturedProcess("ssh", [
-        ...transport.args({ batchMode: true }),
-        "systemctl",
-        "--user",
-        "restart",
-        "t3code-fork.service",
-      ]);
-      const hosted = yield* client.host(sandbox.id, {
-        port: BOAT_HOST_PORT,
-        title: `Cloudbox ${config.name} · T3 Code`,
-      }).pipe(Effect.mapError((cause) => boatCliError("Boat host", cause)));
-      yield* Console.log(hosted.url);
     }),
   ),
 );
@@ -1467,13 +1575,7 @@ const boatResumeCommand = Command.make("resume").pipe(
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* requireManagedBoat(client, config);
-      if (sandbox.state === "archived") {
-        yield* client.resume(sandbox.id, boatMachineInput(config)).pipe(
-          Effect.mapError((cause) => boatCliError("Boat resume", cause)),
-        );
-      }
-      const ready = yield* waitForBoat(client, sandbox.id, "ready");
+      const ready = yield* ensureRunningBoat(client, config);
       const transport = yield* configureBoatTransport(client, config, ready.id);
       yield* Console.log(JSON.stringify({ sandbox: ready, sshHost: transport.host }, null, 2));
     }),
@@ -1493,22 +1595,18 @@ const boatForkCommand = Command.make("fork").pipe(
       }).pipe(Effect.mapError((cause) => boatCliError("Boat fork", cause)));
       const ready = yield* waitForBoat(client, forked.id, "ready");
       const transport = yield* configureBoatTransport(client, config, ready.id);
-      const hosted = yield* client.host(ready.id, {
-        port: BOAT_HOST_PORT,
-        title: `Cloudbox ${config.name} fork · T3 Code`,
-      }).pipe(Effect.mapError((cause) => boatCliError("Boat host fork", cause)));
-      yield* Console.log(JSON.stringify({ sandbox: ready, sshHost: transport.host, url: hosted.url }, null, 2));
+      yield* Console.log(JSON.stringify({ sandbox: ready, sshHost: transport.host }, null, 2));
     }),
   ),
 );
 
 const boatSshCommand = Command.make("ssh").pipe(
-  Command.withDescription("Open an interactive SSH session to the managed Boat sandbox."),
+  Command.withDescription("Resume if needed, then open an interactive SSH session to the managed Boat sandbox."),
   Command.withHandler(() =>
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* requireRunningBoat(client, config);
+      const sandbox = yield* ensureRunningBoat(client, config);
       const transport = yield* configureBoatTransport(client, config, sandbox.id);
       yield* runProcess("ssh", transport.args());
     }),
@@ -1531,7 +1629,7 @@ const boatExecCommand = Command.make("exec", {
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* requireRunningBoat(client, config);
+      const sandbox = yield* ensureRunningBoat(client, config);
       const result = detached
         ? yield* client.execDetachedAndWait(sandbox.id, { command }).pipe(
             Effect.mapError((cause) => boatCliError("Boat detached exec", cause)),
@@ -1552,30 +1650,43 @@ const boatExecCommand = Command.make("exec", {
   ),
 );
 
-const boatHostCommand = Command.make("host", {
-  port: Flag.integer("port").pipe(
-    Flag.withDefault(BOAT_HOST_PORT),
-    Flag.withDescription("Sandbox port to expose (default: the T3 hosting proxy)."),
-  ),
-  title: Flag.string("title").pipe(
-    Flag.withDefault("T3 Code"),
-    Flag.withDescription("Display title for the hosted port."),
-  ),
-  publicAccess: Flag.boolean("public").pipe(
-    Flag.withDefault(false),
-    Flag.withDescription("Create an ungated URL instead of a token-protected URL."),
-  ),
+const boatProxyCommand = Command.make("proxy", {
+  name: Argument.string("name"),
+  port: Argument.integer("port"),
 }).pipe(
-  Command.withDescription("Expose a running Boat sandbox port on a stable HTTPS URL."),
-  Command.withHandler(({ port, publicAccess, title }) =>
+  Command.withDescription("Resume the managed sandbox and proxy stdin/stdout to its current SSH address."),
+  Command.withHandler(({ name, port }) =>
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
+      if (name !== config.name) {
+        return yield* Effect.fail(
+          cliError("Boat SSH proxy", `SSH requested ${name}, but cloudbox.json manages ${config.name}`),
+        );
+      }
+      if (port < 1 || port > 65_535) {
+        return yield* Effect.fail(
+          cliError("Boat SSH proxy", `Invalid SSH port ${String(port)}`),
+        );
+      }
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* requireRunningBoat(client, config);
-      const hosted = yield* client.host(sandbox.id, { port, public: publicAccess, title }).pipe(
-        Effect.mapError((cause) => boatCliError("Boat host", cause)),
+      const ready = yield* ensureRunningBoat(client, config);
+      const current = yield* client.get(ready.id).pipe(
+        Effect.mapError((cause) => boatCliError("Boat SSH address", cause)),
       );
-      yield* Console.log(hosted.url);
+      if (current.ip === undefined || current.ip === null || current.ip.trim().length === 0) {
+        return yield* Effect.fail(
+          cliError("Boat SSH address", `Boat returned no current address for sandbox ${current.id}`),
+        );
+      }
+      yield* Effect.tryPromise({
+        try: () => runBoatSshProxy({ host: current.ip!, port }),
+        catch: (cause) =>
+          cliError(
+            "Boat SSH proxy",
+            cause instanceof BoatSshProxyError ? cause.message : "Boat SSH proxy failed",
+            cause,
+          ),
+      });
     }),
   ),
 );
@@ -1590,7 +1701,7 @@ const boatCommand = Command.make("boat").pipe(
     boatForkCommand,
     boatSshCommand,
     boatExecCommand,
-    boatHostCommand,
+    boatProxyCommand,
   ]),
 );
 

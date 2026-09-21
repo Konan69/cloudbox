@@ -34,6 +34,10 @@ export const T3Config = Schema.Struct({
   settingsParity: T3SettingsParityConfig,
 });
 
+export const BoatT3Config = Schema.Struct({
+  settingsParity: T3SettingsParityConfig,
+});
+
 const hasNoControlCharacters = (value: string): boolean => !/[\u0000-\u001f\u007f]/u.test(value);
 
 const isGitCloneUrl = (value: string): boolean => {
@@ -180,11 +184,11 @@ export const GcpMachineType = Schema.NonEmptyString.pipe(
   }),
 );
 
-const GcpCloudboxName = Schema.String.pipe(
+const ManagedCloudboxName = Schema.String.pipe(
   Schema.refine(
     (value): value is string => /^[a-z0-9](?:[-a-z0-9]{0,48}[a-z0-9])?$/.test(value),
     {
-      identifier: "GcpCloudboxName",
+      identifier: "ManagedCloudboxName",
       description: "1-50 lowercase letters, digits, or hyphens, starting and ending alphanumeric",
     },
   ),
@@ -253,7 +257,7 @@ export const AwsCloudboxConfig = Schema.Struct({
 
 export const GcpCloudboxConfig = Schema.Struct({
   ...SharedConfig,
-  name: GcpCloudboxName,
+  name: ManagedCloudboxName,
   provider: Schema.Literal("gcp"),
   gcp: GcpConfig,
   wake: WakeConfig,
@@ -261,6 +265,8 @@ export const GcpCloudboxConfig = Schema.Struct({
 
 export const BoatCloudboxConfig = Schema.Struct({
   ...SharedConfig,
+  name: ManagedCloudboxName,
+  t3: BoatT3Config,
   boxUser: Schema.Literal("user"),
   provider: Schema.Literal("boat"),
   boat: BoatConfig,

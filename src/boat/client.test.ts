@@ -20,7 +20,7 @@ const sandbox = {
 const response = (value: unknown, status = 200) => Response.json(value, { status });
 
 describe("BoatClient", () => {
-  it.effect("covers lifecycle, exec polling, SSH, and hosting against a fake HTTP layer", () =>
+  it.effect("covers lifecycle, exec polling, and SSH against a fake HTTP layer", () =>
     Effect.gen(function* () {
       const requests: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
       const replies: Array<Response> = [
@@ -93,15 +93,6 @@ describe("BoatClient", () => {
         }),
         response({
           ok: true,
-          type: "port.hosted",
-          success: true,
-          port: 3774,
-          url: "https://cloudbox-3774.on.boat.dev/?_token=secret",
-          isProtected: true,
-          access: "private",
-        }),
-        response({
-          ok: true,
           type: "ssh_key.configured",
           success: true,
           machineIp: "203.0.113.40",
@@ -156,11 +147,10 @@ describe("BoatClient", () => {
       expect((yield* client.updateName(sandbox.id, "renamed")).name).toBe("renamed");
       expect((yield* client.exec(sandbox.id, { command: "true", timeoutSeconds: 60 })).stdout).toBe("done\n");
       expect((yield* client.execDetachedAndWait(sandbox.id, { command: "vp run build" })).stdout).toBe("built\n");
-      expect((yield* client.host(sandbox.id, { port: 3774, title: "T3 Code" })).isProtected).toBe(true);
       expect((yield* client.configureSshKey(sandbox.id, "ssh-ed25519 AAAA test")).sshUser).toBe("user");
       expect((yield* client.delete(sandbox.id)).operation.targetId).toBe(sandbox.id);
 
-      expect(requests).toHaveLength(16);
+      expect(requests).toHaveLength(15);
       expect(requests[0]?.url).toBe("https://boat.test/api/v1/limits");
       expect(new Headers(requests[0]?.init?.headers).get("Authorization")).toBe("Bearer boat_test");
       expect(new Headers(requests[1]?.init?.headers).get("Idempotency-Key")).toBe("create-key");
@@ -179,8 +169,8 @@ describe("BoatClient", () => {
         command: "vp run build",
         detached: true,
       });
-      expect(requests[15]?.init?.method).toBe("DELETE");
-      expect(new Headers(requests[15]?.init?.headers).get("X-Ascii-Confirm-Delete")).toBe(sandbox.id);
+      expect(requests[14]?.init?.method).toBe("DELETE");
+      expect(new Headers(requests[14]?.init?.headers).get("X-Ascii-Confirm-Delete")).toBe(sandbox.id);
     }),
   );
 

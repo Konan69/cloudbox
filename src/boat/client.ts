@@ -184,17 +184,6 @@ export const CommandStatusResponse = Schema.Struct({
 });
 export type CommandStatusResponse = typeof CommandStatusResponse.Type;
 
-const HostPortResponse = Schema.Struct({
-  ok: Schema.Literal(true),
-  type: Schema.Literal("port.hosted"),
-  success: Schema.Boolean,
-  port: PositiveInteger,
-  url: Schema.NonEmptyString,
-  isProtected: Schema.Boolean,
-  access: Schema.Literals(["private", "public"]),
-});
-export type HostPortResponse = typeof HostPortResponse.Type;
-
 const SshKeyResponse = Schema.Struct({
   ok: Schema.Literal(true),
   type: Schema.Literal("ssh_key.configured"),
@@ -274,12 +263,6 @@ export interface ExecInput {
   readonly timeoutSeconds?: number;
 }
 
-export interface HostPortInput {
-  readonly port: number;
-  readonly title?: string;
-  readonly public?: boolean;
-}
-
 export interface BoatClientOptions {
   readonly apiKey: string;
   readonly baseUrl?: string;
@@ -303,7 +286,6 @@ export interface BoatClientShape {
   readonly execDetached: (sandboxId: string, input: ExecInput) => Effect.Effect<CommandStartedResponse, BoatClientError>;
   readonly commandStatus: (sandboxId: string, processId: number) => Effect.Effect<CommandStatusResponse, BoatClientError>;
   readonly execDetachedAndWait: (sandboxId: string, input: ExecInput) => Effect.Effect<CommandStatusResponse, BoatClientError>;
-  readonly host: (sandboxId: string, input: HostPortInput) => Effect.Effect<HostPortResponse, BoatClientError>;
   readonly configureSshKey: (sandboxId: string, publicKey: string) => Effect.Effect<SshKeyResponse, BoatClientError>;
 }
 
@@ -523,15 +505,6 @@ export const makeBoatClient = (options: BoatClientOptions): BoatClientShape => {
         }),
       );
     });
-  const host = (sandboxId: string, input: HostPortInput) =>
-    request("host sandbox port", `${sandboxPath(sandboxId)}/host`, HostPortResponse, {
-      method: "POST",
-      ...jsonBody({
-        port: input.port,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(input.public === undefined ? {} : { public: input.public }),
-      }),
-    });
   const configureSshKey = (sandboxId: string, publicKey: string) =>
     request("configure sandbox SSH key", `${sandboxPath(sandboxId)}/sshkey`, SshKeyResponse, {
       method: "POST",
@@ -553,7 +526,6 @@ export const makeBoatClient = (options: BoatClientOptions): BoatClientShape => {
     execDetached,
     commandStatus,
     execDetachedAndWait,
-    host,
     configureSshKey,
   };
 };
