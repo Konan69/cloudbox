@@ -3,7 +3,7 @@
 Read the [product description](docs/product-description.md) for the user-visible lifecycle,
 selective loadout behavior, provisioning/upgrade boundary, mobile support, and verified gaps.
 
-One personal AWS EC2, Google Compute Engine, or boat.dev development machine for dev. It runs the patched T3 Code fork headlessly and is controlled from a laptop with an Effect CLI. AWS/GCP use the existing infrastructure lane; Boat uses the `cloudbox boat` command group.
+One personal AWS EC2, Google Compute Engine, or boat.dev development machine for dev. AWS/GCP run the patched T3 Code fork headlessly. Boat is a stock SSH sandbox used by the Windows T3 desktop, which installs its matching server release after connecting. The Effect CLI manages each provider; Boat uses the `cloudbox boat` command group.
 
 ## What it creates
 
@@ -86,7 +86,7 @@ GCE suspend preserves memory, but supports only instances with at most 208 GB RA
 
 ## Boat provider
 
-Boat is CLI-managed and does not use Alchemy. It creates or resumes one named sandbox, configures the existing SSH public key, builds the patched T3 fork, installs an enabled `systemd --user` service, pushes the normal Cloudbox identity/repository/settings loadout over SSH, and exposes T3 through a protected Boat HTTPS URL.
+Boat is CLI-managed and does not use Alchemy. It creates or resumes one named stock sandbox, authorizes the Boat SSH key, pushes the normal Cloudbox identity/repository/settings loadout, and writes a managed Windows OpenSSH entry at `C:\Users\dev\.ssh\config`. Cloudbox does not build or run T3 on Boat and does not use Boat hosting.
 
 ```bash
 cp cloudbox.boat.example.json cloudbox.json
@@ -95,9 +95,9 @@ pnpm build:cli
 pnpm cloudbox boat up
 ```
 
-`boat up` is the complete first-run command after configuration. It prints the token-bearing HTTPS URL. See [docs/boat-provider.md](docs/boat-provider.md) for lifecycle commands, limits, and the loopback hosting proxy.
+`boat up` prints `cloudbox-<name>`. In the Windows T3 desktop, add that host as an **SSH environment**. T3 installs its matching server release and owns the tunnel. The SSH entry calls the WSL-side `cloudbox boat proxy` through `wsl.exe`; the proxy resumes a stopped sandbox, handles `boat_restoring`, and resolves the current address before piping SSH.
 
-Boat snapshots files and enabled services, not RAM or hand-run processes. Its TTL counts from machine start rather than last activity; `idleMinutes` remains part of the shared config but does not control Boat auto-stop.
+Boat restores onto a new machine, so its IP and SSH host keys can change. Its TTL counts from machine start rather than last activity; `idleMinutes` remains part of the shared config but does not control Boat auto-stop. See [docs/boat-provider.md](docs/boat-provider.md) for the exact SSH block, Windows key/API-key setup, lifecycle commands, and limits.
 
 ## Configure
 
@@ -107,7 +107,7 @@ cp cloudbox.example.json cloudbox.json
 $EDITOR cloudbox.json
 ```
 
-Every field for the selected provider is required unless marked optional. There are no provider defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Boat requires `boat.type` and `boat.ttlSeconds`; `boat.environment` is optional, and Boat's SSH user is `user`. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`. The optional `bootstrap` block allowlists paths that this box may send or receive during a box-to-box bootstrap:
+Every field for the selected provider is required unless marked optional. There are no provider defaults. AWS requires explicit `region`, `instanceType`, `diskGb`, and `aws.sshCidr`; the CIDR rejects `0.0.0.0/0`. GCP requires explicit `project`, `zone`, Intel N1/N2/C2 `machineType`, boot/data disk sizes, data-disk type, and credentials, with no SSH CIDR. Boat requires `boat.type` and `boat.ttlSeconds`; `boat.environment` is optional, its SSH user is `user`, and `sshPublicKeyPath` must be `~/.ssh/ascii_box_ed25519.pub`. Its `t3` block contains settings parity only—Boat does not accept the AWS/GCP fork repository or branch fields. Windows OpenSSH uses the matching private key at `C:\Users\dev\.ssh\ascii_box_ed25519`. Identity sync requires `maxTransferMb`. Sync parity also requires `repos` and `t3.settingsParity`. The optional `bootstrap` block allowlists paths that this box may send or receive during a box-to-box bootstrap:
 
 ```json
 {
@@ -255,11 +255,13 @@ Verification prints a table by default or JSON with `--json`, and exits non-zero
 
 GCP's external IP is ephemeral egress state and may change after suspend/resume; it must never be pinned. GCP access uses the instance name through IAP. AWS commands continue to discover and use the current public IP.
 
-## Box services
+## AWS/GCP box services
+
+Boat does not install these services; its T3 server lifecycle belongs to the Windows T3 desktop SSH environment.
 
 ### T3 Code
 
-Bootstrap clones branch `main`, runs `vp install --frozen-lockfile`, builds only the `t3` package and its dependencies, and installs `t3code-fork.service` as a lingering systemd user service.
+AWS/GCP bootstrap clones branch `main`, runs `vp install --frozen-lockfile`, builds only the `t3` package and its dependencies, and installs `t3code-fork.service` as a lingering systemd user service.
 
 The service runs:
 
