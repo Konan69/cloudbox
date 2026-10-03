@@ -250,9 +250,9 @@ const checkSshPrerequisites = (config: CloudboxConfig) =>
     catch: sshTransportError,
   });
 
-const makeSshTransport = (config: CloudboxConfig, awsHost?: string) =>
+const makeSshTransport = (config: CloudboxConfig, awsHost?: string, port?: number) =>
   Effect.try({
-    try: () => requireSshTransport(config, awsHost),
+    try: () => requireSshTransport(config, awsHost, port),
     catch: sshTransportError,
   });
 
@@ -1339,6 +1339,29 @@ const readBoatPublicKey = (config: BoatCloudboxConfig) =>
     return yield* requireString("Boat SSH public key", key.trim());
   });
 
+/**
+ * Where SSH for a Boat sandbox actually listens. Boat puts every sandbox behind
+ * a shared IPv4 host with a per-sandbox port (`sshEndpoint`, "host:port"); the
+ * sandbox's `ip` field is an IPv6 address that is not reachable from WSL2. The
+ * endpoint changes on every resume, so it is read fresh for each connection and
+ * a missing or malformed value is an error rather than a fallback to `ip`.
+ */
+const boatSshEndpoint = (sandbox: { readonly id: string; readonly sshEndpoint?: string | null }) =>
+  Effect.gen(function* () {
+    const match = /^(?<host>[^:\s]+):(?<port>\d{1,5})$/u.exec(sandbox.sshEndpoint?.trim() ?? "");
+    const host = match?.groups?.["host"];
+    const port = Number(match?.groups?.["port"]);
+    if (host === undefined || !Number.isInteger(port) || port < 1 || port > 65_535) {
+      return yield* Effect.fail(
+        cliError(
+          "Boat SSH address",
+          `Boat returned no usable SSH endpoint for sandbox ${sandbox.id}`,
+        ),
+      );
+    }
+    return { host, port };
+  });
+
 const configureBoatTransport = (
   client: BoatClientShape,
   config: BoatCloudboxConfig,
@@ -1349,12 +1372,14 @@ const configureBoatTransport = (
     const configured = yield* client.configureSshKey(sandboxId, publicKey).pipe(
       Effect.mapError((cause) => boatCliError("Boat SSH key", cause)),
     );
-    if (!configured.success || configured.machineIp === null) {
-      return yield* Effect.fail(
-        cliError("Boat SSH key", "Boat did not return a machine IP after configuring SSH"),
-      );
+    if (!configured.success) {
+      return yield* Effect.fail(cliError("Boat SSH key", "Boat did not accept the SSH key"));
     }
-    const transport = yield* makeSshTransport(config, configured.machineIp);
+    const current = yield* client.get(sandboxId).pipe(
+      Effect.mapError((cause) => boatCliError("Boat SSH address", cause)),
+    );
+    const endpoint = yield* boatSshEndpoint(current);
+    const transport = yield* makeSshTransport(config, endpoint.host, endpoint.port);
     yield* waitForSsh(transport);
     return transport;
   });
@@ -1673,13 +1698,11 @@ const boatProxyCommand = Command.make("proxy", {
       const current = yield* client.get(ready.id).pipe(
         Effect.mapError((cause) => boatCliError("Boat SSH address", cause)),
       );
-      if (current.ip === undefined || current.ip === null || current.ip.trim().length === 0) {
-        return yield* Effect.fail(
-          cliError("Boat SSH address", `Boat returned no current address for sandbox ${current.id}`),
-        );
-      }
+      // The port OpenSSH passes (%p) is the alias's nominal 22; the sandbox
+      // listens on the port in Boat's endpoint, which wins.
+      const endpoint = yield* boatSshEndpoint(current);
       yield* Effect.tryPromise({
-        try: () => runBoatSshProxy({ host: current.ip!, port }),
+        try: () => runBoatSshProxy({ host: endpoint.host, port: endpoint.port }),
         catch: (cause) =>
           cliError(
             "Boat SSH proxy",

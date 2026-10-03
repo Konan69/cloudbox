@@ -63,7 +63,7 @@ Host cloudbox-dev
     UserKnownHostsFile NUL
     GlobalKnownHostsFile NUL
     LogLevel ERROR
-    ProxyCommand C:/Windows/System32/wsl.exe --distribution "Ubuntu-24.04" --cd "/home/dev/cloudbox" --exec "/usr/local/lib/nodejs/node-v24.14.1-linux-x64/bin/node" "/home/dev/cloudbox/dist/cli.mjs" boat proxy "dev" %p
+    ProxyCommand C:/Windows/System32/wsl.exe --distribution Ubuntu-24.04 --cd /home/dev/cloudbox --exec /usr/local/lib/nodejs/node-v24.14.1-linux-x64/bin/node /home/dev/cloudbox/dist/cli.mjs boat proxy dev %p
 # END CLOUDBOX BOAT cloudbox-dev
 ```
 

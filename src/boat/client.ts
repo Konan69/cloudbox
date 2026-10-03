@@ -1,9 +1,21 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+
+export const BOAT_API_KEY_FILE = join(homedir(), ".config", "cloudbox", "boat-api-key");
+
+/** The stored Boat API key, or undefined when setup has not written one. */
+const readBoatApiKeyFile = (): string | undefined => {
+  if (!existsSync(BOAT_API_KEY_FILE)) return undefined;
+  const key = readFileSync(BOAT_API_KEY_FILE, "utf8").trim();
+  return key.length === 0 ? undefined : key;
+};
 
 export const BOAT_API_BASE = "https://boat.dev/api/v1";
 
@@ -38,6 +50,9 @@ export const BoatSandbox = Schema.Struct({
   billingMultiplier: Schema.optionalKey(Schema.Number),
   url: Schema.optionalKey(NullableString),
   ip: Schema.optionalKey(NullableString),
+  // IPv4 `host:port` Boat publishes for SSH. The sandbox's own `ip` is IPv6
+  // only, which WSL2 and many home networks cannot route.
+  sshEndpoint: Schema.optionalKey(NullableString),
   createdAt: Schema.optionalKey(NullableString),
   updatedAt: Schema.optionalKey(NullableString),
   archiveAfter: Schema.optionalKey(NullableString),
@@ -82,6 +97,17 @@ export type BoatLimitsResponse = typeof BoatLimitsResponse.Type;
 const SandboxInfoResponse = Schema.Struct({
   ok: Schema.Literal(true),
   type: Schema.Literal("sandbox.info"),
+  sandbox: BoatSandbox,
+});
+
+/**
+ * PATCH /sandboxes/:id answers with its own envelope tag. Verified against the
+ * live API on 2026-10-03; decoding it as `sandbox.info` failed every rename and
+ * TTL update after the change had already been applied.
+ */
+const SandboxUpdatedResponse = Schema.Struct({
+  ok: Schema.Literal(true),
+  type: Schema.Literal("sandbox.updated"),
   sandbox: BoatSandbox,
 });
 
@@ -456,7 +482,7 @@ export const makeBoatClient = (options: BoatClientOptions): BoatClientShape => {
       headers: { "X-Ascii-Confirm-Delete": sandboxId },
     });
   const patchSandbox = (operation: string, sandboxId: string, body: unknown) =>
-    request(operation, sandboxPath(sandboxId), SandboxInfoResponse, {
+    request(operation, sandboxPath(sandboxId), SandboxUpdatedResponse, {
       method: "PATCH",
       ...jsonBody(body),
     }).pipe(Effect.map((response) => response.sandbox));
@@ -533,7 +559,10 @@ export const makeBoatClient = (options: BoatClientOptions): BoatClientShape => {
 export const makeBoatClientFromEnvironment = (
   options: Omit<BoatClientOptions, "apiKey"> = {},
 ): Effect.Effect<BoatClientShape, BoatConfigError> => {
-  const apiKey = process.env.BOAT_API_KEY?.trim();
+  // Windows OpenSSH starts the proxy through wsl.exe, where the key only
+  // arrives if WSLENV forwards it. The key file is the same credential stored
+  // by setup (mode 600), so the proxy works without that fragile hop.
+  const apiKey = process.env.BOAT_API_KEY?.trim() || readBoatApiKeyFile();
   if (apiKey === undefined || apiKey.length === 0) {
     return Effect.fail(new BoatConfigError({ message: "BOAT_API_KEY is required" }));
   }

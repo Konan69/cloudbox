@@ -93,6 +93,12 @@ const shellQuote = (value: string): string =>
 export const buildSshTransport = (
   config: CloudboxConfig,
   directHost?: string,
+  /**
+   * SSH port when the host is not on 22. Boat publishes each sandbox behind an
+   * IPv4 endpoint with its own port; carried as `-o Port=` so ssh, scp and
+   * rsync's `-e ssh` all honor it.
+   */
+  port?: number,
 ): SshTransport => {
   if (config.provider === "gcp" && directHost !== undefined) {
     throw new SshTransportError({
@@ -114,8 +120,11 @@ export const buildSshTransport = (
   const privateKeyPath = privateKeyPathFromConfig(config.sshPublicKeyPath);
   const sshHost = host.includes(":") ? `[${host}]` : host;
   const target = `${config.boxUser}@${sshHost}`;
-  const optionsFor = (options: SshArgsOptions = {}) =>
-    buildOptions(config, privateKeyPath, options);
+  const portOption = port === undefined ? [] : sshOption(`Port=${String(port)}`);
+  const optionsFor = (options: SshArgsOptions = {}) => [
+    ...buildOptions(config, privateKeyPath, options),
+    ...portOption,
+  ];
 
   return {
     provider: config.provider,
@@ -158,8 +167,9 @@ export const assertSshPrerequisites = (
 export const requireSshTransport = (
   config: CloudboxConfig,
   awsHost?: string,
+  port?: number,
 ): SshTransport => {
-  const transport = buildSshTransport(config, awsHost);
+  const transport = buildSshTransport(config, awsHost, port);
   assertSshPrerequisites(config);
   return transport;
 };

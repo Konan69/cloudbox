@@ -28,7 +28,7 @@ describe("Boat Windows SSH config", () => {
     expect(block).toContain("    StrictHostKeyChecking no");
     expect(block).toContain("    UserKnownHostsFile NUL");
     expect(block).toContain(
-      "ProxyCommand C:/Windows/System32/wsl.exe --distribution \"Ubuntu-24.04\" --cd \"/home/dev/cloudbox\" --exec \"/usr/local/bin/node\" \"/home/dev/cloudbox/dist/cli.mjs\" boat proxy \"dev\" %p",
+      "ProxyCommand C:/Windows/System32/wsl.exe --distribution Ubuntu-24.04 --cd /home/dev/cloudbox --exec /usr/local/bin/node /home/dev/cloudbox/dist/cli.mjs boat proxy dev %p",
     );
     expect(block).toContain("# END CLOUDBOX BOAT cloudbox-dev");
   });

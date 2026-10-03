@@ -22,8 +22,17 @@ export interface BoatWindowsSshBlockInput {
   readonly cliPath: string;
 }
 
+/**
+ * Quotes a ProxyCommand argument only when it needs quoting. Windows OpenSSH
+ * hands the command to wsl.exe with quotes intact, and wsl.exe then looks up a
+ * distribution literally named `"Ubuntu-24.04"` (verified 2026-10-03:
+ * WSL_E_DISTRO_NOT_FOUND, which reached ssh as an invalid banner). Plain
+ * values are therefore emitted bare.
+ */
 const sshConfigQuote = (value: string): string =>
-  `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  /^[A-Za-z0-9_@%+=:,./~-]+$/u.test(value)
+    ? value
+    : `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 
 const markerName = (name: string): string => `cloudbox-${name}`;
 
