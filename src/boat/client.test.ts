@@ -49,8 +49,8 @@ describe("BoatClient", () => {
         response({ ok: true, type: "sandbox.stopping", id: sandbox.id, status: "archiving", sandbox }, 202),
         response({ ok: true, type: "sandbox.resuming", id: sandbox.id, status: "resuming", sandbox }, 202),
         response({ ok: true, type: "sandbox.forking", id: "SANDBOX_ID", status: "forking", sandbox: { ...sandbox, id: "SANDBOX_ID" } }, 202),
-        response({ ok: true, type: "sandbox.info", sandbox: { ...sandbox, archiveAfter: null } }),
-        response({ ok: true, type: "sandbox.info", sandbox: { ...sandbox, name: "renamed" } }),
+        response({ ok: true, type: "sandbox.updated", sandbox: { ...sandbox, archiveAfter: null } }),
+        response({ ok: true, type: "sandbox.updated", sandbox: { ...sandbox, name: "renamed" } }),
         response({
           ok: true,
           type: "command.finished",
