@@ -1409,6 +1409,20 @@ const ensureRunningBoat = (client: BoatClientShape, config: BoatCloudboxConfig) 
     return yield* waitForBoat(client, sandbox.id, "ready");
   });
 
+// ssh, exec and proxy never wake a box: a reconnecting tunnel or T3 SSH
+// environment kept stopped boxes billing around the clock. Starting a box is
+// explicit, through `cloudbox boat up` or `cloudbox boat resume`.
+const requireRunningBoat = (client: BoatClientShape, config: BoatCloudboxConfig) =>
+  Effect.gen(function* () {
+    const sandbox = yield* requireManagedBoat(client, config);
+    if (sandbox.state === "archiving" || sandbox.state === "archived") {
+      return yield* Effect.fail(
+        cliError("Boat sandbox", `${managedBoatName(config)} is stopped; run cloudbox boat resume to start it`),
+      );
+    }
+    return yield* waitForBoat(client, sandbox.id, "ready");
+  });
+
 interface BoatWindowsSshConfigResult {
   readonly alias: string;
   readonly configPath: string;
@@ -1631,7 +1645,7 @@ const boatSshCommand = Command.make("ssh").pipe(
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* ensureRunningBoat(client, config);
+      const sandbox = yield* requireRunningBoat(client, config);
       const transport = yield* configureBoatTransport(client, config, sandbox.id);
       yield* runProcess("ssh", transport.args());
     }),
@@ -1654,7 +1668,7 @@ const boatExecCommand = Command.make("exec", {
     Effect.gen(function* () {
       const config = yield* loadBoatConfig();
       const client = yield* makeConfiguredBoatClient();
-      const sandbox = yield* ensureRunningBoat(client, config);
+      const sandbox = yield* requireRunningBoat(client, config);
       const result = detached
         ? yield* client.execDetachedAndWait(sandbox.id, { command }).pipe(
             Effect.mapError((cause) => boatCliError("Boat detached exec", cause)),
@@ -1694,7 +1708,7 @@ const boatProxyCommand = Command.make("proxy", {
         );
       }
       const client = yield* makeConfiguredBoatClient();
-      const ready = yield* ensureRunningBoat(client, config);
+      const ready = yield* requireRunningBoat(client, config);
       const current = yield* client.get(ready.id).pipe(
         Effect.mapError((cause) => boatCliError("Boat SSH address", cause)),
       );
