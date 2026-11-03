@@ -84,7 +84,7 @@ Every created smoke thread is deleted, including failed cases. The smoke project
 
 `--machine-mode` updates the smoke project with `machineMode: "thread"` before creating threads. For each provider, it waits for the streamed session state to become `running`, then checks over SSH that the deterministic `thread-…` Incus instance is `RUNNING`, `tank/threads/<thread-id>/ws` exists, and its mounted workspace contains `README.md`. The agent must report `hostname`, `/etc/hostname`, and `/home/dev/ws`; the smoke requires both hostnames to equal the Incus machine name, rejects `cloudbox-test`, and requires the workspace listing to contain `README.md`. After `thread.delete`, it reports whether the instance and dataset were destroyed or retained in the overlay's archived state. Each assertion prints its own PASS/FAIL and evidence.
 
-The implementation follows these contracts from dev's fork:
+The implementation follows these contracts from the owner's fork:
 
 - `packages/contracts/src/environmentHttp.ts:434-438,500-530` defines bearer-authenticated WebSocket-ticket issuance plus orchestration snapshot, thread snapshot, and dispatch HTTP routes.
 - `packages/contracts/src/orchestration.ts:287-310,454-465,731-760` defines project `machineMode`, persisted thread machine bindings, and the `project.meta.update` command used to enable machine mode, alongside the existing project/thread lifecycle commands.

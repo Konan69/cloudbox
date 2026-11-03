@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Print the devbox for heavy work (gate, build, emulator, dev server, worker suite, browser).
+# stdout: one host name. stderr: the numbers behind the choice. Packs work onto the fewest running boxes. Never considers cloudbox-example-app.
+# Measures only boxes that are already running (asking the Boat API, never ssh-ing a stopped box,
+# which used to wake all three). If none is running or none has room, it explicitly starts ONE
+# stopped box with devbox-start, preferring the order below. Stop what you start: devbox-stop <host>.
+set -uo pipefail
+read -r -a hosts <<< "${CLOUDBOX_HOSTS:-cloudbox-dev}"
+key=$(cat ~/.config/cloudbox/boat-api-key)
+# The API sometimes answers with a non-JSON body (seen 2026-10-24); retry the whole read, not only the transport.
+# The read prints "read:" before the names, so "every box is stopped" (no names) is told apart
+# from a failed read (no output); both used to print "Boat API unreachable" (2026-10-26).
+read_ok=""
+for attempt in 1 2 3; do
+  read_ok=$(curl -fsS -m 30 --retry 2 -H "Authorization: Bearer $key" "https://boat.dev/api/v1/sandboxes?limit=100" \
+    | python3 -c "import sys,json; print('read: ' + ' '.join(s['name'] for s in json.load(sys.stdin)['sandboxes'] if s['state'] in ('ready','idle','running','busy')))" 2>/dev/null) && break
+  read_ok=""; sleep $((attempt * 2))
+done
+[ -n "$read_ok" ] || { echo "Boat API unreachable after 3 reads" >&2; exit 1; }
+running=${read_ok#read: }
+best=""; best_ratio=""
+for h in "${hosts[@]}"; do
+  [[ " $running " == *" $h "* ]] || { echo "$h stopped" >&2; continue; }
+  out=$(ssh -o ConnectTimeout=40 -o BatchMode=yes "$h" \
+    'echo "$(cut -d" " -f1 /proc/loadavg) $(nproc) $(awk "/MemAvailable/{print int(\$2/1024)}" /proc/meminfo) $(~/.local/bin/node -e "process.stdout.write(process.versions.node.split(\".\")[0])" 2>/dev/null || echo 0)"' 2>/dev/null) \
+    || { echo "$h unreachable" >&2; continue; }
+  read -r load cores avail nodemajor <<<"$out"
+  # The gate runs ~/.local/bin/node; a box where it is missing, old or crashing cannot run it
+  # (cloudbox-dev3's Node 24 segfaulted on 2026-10-24 and every gate there failed).
+  if [ "${nodemajor:-0}" -lt 24 ]; then echo "$h node ${nodemajor:-0} unusable for the gate" >&2; continue; fi
+  # A box whose run queue exceeds its cores scores zero (SSH timed out at load 156 on 2026-10-13).
+  score=$(awk -v l="$load" -v c="$cores" -v a="$avail" 'BEGIN{print (l>c)?0:a}')
+  echo "$h load=$load/$cores avail=${avail}MB score=$score" >&2
+  # Pack: the first running box in order with room wins, so the others go idle and expire.
+  if [ "$score" -ge 4096 ]; then echo "$h"; exit 0; fi
+  # Fallback when every box is tight: the lowest load per core, not the first in order.
+  ratio=$(awk -v l="$load" -v c="$cores" 'BEGIN{printf "%.3f", l/c}')
+  if [ -z "$best_ratio" ] || awk -v r="$ratio" -v b="$best_ratio" 'BEGIN{exit !(r<b)}'; then best=$h; best_ratio=$ratio; fi
+done
+# No running box has 4 GB free: start a stopped box rather than overload a busy one.
+for h in "${hosts[@]}"; do
+  [[ " $running " == *" $h "* ]] && continue
+  exec "$(dirname "$0")/devbox-start" "$h"
+done
+[ -n "$best" ] && { echo "all boxes running and tight; using $best" >&2; echo "$best"; exit 0; }
+echo "no devbox available" >&2; exit 1

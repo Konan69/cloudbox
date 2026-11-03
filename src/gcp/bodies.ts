@@ -24,6 +24,7 @@ export interface InstanceBodyInput {
   readonly networkTag: string;
   readonly startupScript: string;
   readonly sshPublicKey: string;
+  readonly boxUser?: string;
   readonly cloudboxName: string;
 }
 
@@ -153,7 +154,7 @@ export const buildInstanceInsertBody = (input: InstanceBodyInput) => ({
   metadata: {
     items: [
       { key: "startup-script", value: input.startupScript },
-      { key: "ssh-keys", value: `dev:${input.sshPublicKey.trim()}` },
+      { key: "ssh-keys", value: `${input.boxUser ?? "dev"}:${input.sshPublicKey.trim()}` },
     ],
   },
   serviceAccounts: [

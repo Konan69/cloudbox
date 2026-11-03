@@ -19,11 +19,11 @@ const config = {
   idleMinutes: 45,
   t3Port: 3773,
   t3: {
-    repoUrl: "https://github.com/example/t3code.git",
+    repoUrl: "https://github.com/pingdotgg/t3code.git",
     branch: "main",
     relayUrl: "https://relay.t3.codes",
-    clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
-    clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
+    clerkPublishableKey: "example-publishable-key",
+    clerkCliOauthClientId: "example-client-id",
   },
 } as const;
 
@@ -56,7 +56,7 @@ describe("renderHostBootstrap", () => {
     expect(script).toContain('chown -R "$HOST_UID:$HOST_GID" "/home/$USER_NAME"');
     expect(script).toContain('incus exec golden-build -- getent passwd ubuntu');
     expect(script).toContain("--rebuild");
-    expect(script).toContain("https://github.com/example/t3code.git");
+    expect(script).toContain("https://github.com/pingdotgg/t3code.git");
     expect(script).toContain("main");
     expect(script).toContain("apps/server/dist/bin.mjs serve");
     expect(script).toContain("--host 127.0.0.1 --port 3773");

@@ -10,23 +10,12 @@
   "idleMinutes": 30,
   "t3": {
     "settingsParity": {
-      "enabled": true,
-      "keybindings": true
+      "enabled": false,
+      "keybindings": false
     }
   },
   "identity": {
-    "paths": [
-      "~/.claude/settings.json",
-      "~/.claude/CLAUDE.md",
-      "~/.claude/skills/",
-      "~/.agents/skills/",
-      "~/.claude/projects/-home-dev/memory/",
-      "~/.pi/agent/auth.json",
-      "~/.pi/agent/settings.json",
-      "~/.pi/agents/",
-      "~/.pi/agent/AGENTS.md",
-      "~/.config/gh/"
-    ],
+    "paths": [],
     "excludes": [
       "sessions/",
       "npm/",

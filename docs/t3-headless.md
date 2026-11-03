@@ -161,8 +161,8 @@ T3=(node "$PWD/apps/server/dist/bin.mjs")
 
 export T3CODE_HOME=/home/dev/.t3
 export T3CODE_RELAY_URL=https://relay.t3.codes
-export T3CODE_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsudDMuY29kZXMk
-export T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=hzxSgY2cH10sDU2r
+export T3CODE_CLERK_PUBLISHABLE_KEY=example-publishable-key
+export T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=example-client-id
 
 # Installs/locates cloudflared, performs Clerk OOB OAuth, and records managed-link intent.
 "${T3[@]}" connect link --headless --base-dir "$T3CODE_HOME"
@@ -327,8 +327,8 @@ Type=simple
 WorkingDirectory=/home/dev
 Environment=T3CODE_HOME=/home/dev/.t3
 Environment=T3CODE_RELAY_URL=https://relay.t3.codes
-Environment=T3CODE_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsudDMuY29kZXMk
-Environment=T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=hzxSgY2cH10sDU2r
+Environment=T3CODE_CLERK_PUBLISHABLE_KEY=example-publishable-key
+Environment=T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=example-client-id
 Environment=PATH=$SERVICE_PATH
 ExecStart=$NODE_BIN $REPO/apps/server/dist/bin.mjs serve --base-dir /home/dev/.t3 --host 127.0.0.1 --port 3773 /home/dev
 KillMode=mixed
@@ -691,7 +691,7 @@ The patched decision chooses Windows-native versus WSL for the **primary** local
 - Official release CI injects the relay/Clerk public values at build time. Source builds read process env, `.env.local`, then `.env`. [scripts/lib/public-config.ts:23-65] [docs/internals/t3-connect.md:39-50]
 - A fresh clone does **not** automatically consume `.env.example`; T3 Connect is disabled until values are supplied. [docs/internals/t3-connect.md:17-25]
 - The headless server bundle supports runtime overrides through `T3CODE_RELAY_URL`, `T3CODE_CLERK_PUBLISHABLE_KEY`, and `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`. [apps/server/src/cloud/publicConfig.ts:98-113] [apps/server/src/cloud/publicConfig.ts:160-214]
-- Desktop/web/mobile client relay values are build-time configuration. To use dev's future self-hosted relay, rebuild those clients with matching Clerk/relay public config; changing only the server cannot redirect an already-built desktop/mobile client. [docs/internals/t3-connect.md:39-57]
+- Desktop/web/mobile client relay values are build-time configuration. To use the owner's future self-hosted relay, rebuild those clients with matching Clerk/relay public config; changing only the server cannot redirect an already-built desktop/mobile client. [docs/internals/t3-connect.md:39-57]
 
 Whether the already-installed patched desktop binary retained production relay config is **unknown from this source tree**; that depends on the environment used when its replaced web/server bundles were built.
 
@@ -732,8 +732,8 @@ command -v opencode || true
 T3=(node "$PWD/apps/server/dist/bin.mjs")
 export T3CODE_HOME=/home/dev/.t3
 export T3CODE_RELAY_URL=https://relay.t3.codes
-export T3CODE_CLERK_PUBLISHABLE_KEY=pk_live_Y2xlcmsudDMuY29kZXMk
-export T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=hzxSgY2cH10sDU2r
+export T3CODE_CLERK_PUBLISHABLE_KEY=example-publishable-key
+export T3CODE_CLERK_CLI_OAUTH_CLIENT_ID=example-client-id
 "${T3[@]}" connect link --headless --base-dir "$T3CODE_HOME"
 
 # 5. Install/start the custom t3code-fork.service above; do not use `service install`.

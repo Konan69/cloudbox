@@ -32,6 +32,9 @@ export const T3Config = Schema.Struct({
   repoUrl: Schema.NonEmptyString,
   branch: Schema.NonEmptyString,
   settingsParity: T3SettingsParityConfig,
+  relayUrl: Schema.optionalKey(Schema.String),
+  clerkPublishableKey: Schema.optionalKey(Schema.String),
+  clerkCliOauthClientId: Schema.optionalKey(Schema.String),
 });
 
 export const BoatT3Config = Schema.Struct({
@@ -243,7 +246,7 @@ const SharedConfig = {
   identity: IdentityConfig,
   bootstrap: Schema.optionalKey(BootstrapConfig),
   repos: ReposConfig,
-  boxUser: Schema.Literal("dev"),
+  boxUser: Schema.String.check(Schema.isPattern(/^[a-z_][a-z0-9_-]*$/)),
 } as const;
 
 export const AwsCloudboxConfig = Schema.Struct({

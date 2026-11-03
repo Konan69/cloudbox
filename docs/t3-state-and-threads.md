@@ -2,7 +2,7 @@
 
 ## Scope and bottom line
 
-This is source-only recon of dev's patched fork on branch `main`. No dependencies were installed and nothing was built or run.
+This is source-only recon of the owner's patched fork on branch `main`. No dependencies were installed and nothing was built or run.
 
 **Bottom line:** WSL and GCE are two independent T3 execution environments. Each server owns its own SQLite event store/read model, projects, threads, provider runtime bindings, files, Git worktrees, provider availability/auth, and server settings. The desktop can present both environments together, but that is client-side aggregation: it is not thread replication. T3 Connect/PlanetScale stores environment-link, tunnel, device, and sparse agent-activity data; it is not a thread store. The safe recommendation is **push only verified identity material and start fresh cloud threads**. Selective historical thread migration is unsupported and touches more than SQLite rows.
 
@@ -253,7 +253,7 @@ No dedicated settings export/import feature was found. The source-backed transfe
 
 ---
 
-## 6. Recommendation for dev
+## 6. Recommendation for the owner
 
 ### Do now: fresh cloud threads
 

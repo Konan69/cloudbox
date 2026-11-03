@@ -222,3 +222,17 @@ The transport and delivery boundary is defined in [box communications](box-commu
 ## Verification record
 
 See [product-description verification](product-description-verification.md).
+
+## Packaging configuration
+
+The example configs copy no identity or bootstrap files. Select paths before enabling sync.
+
+`boxUser` selects the AWS or GCP Linux account. Boat uses `user`. The default examples use `dev` for AWS and GCP.
+Set `CLOUDBOX_BOX_USER` to the same account when running the machine CLI or thread smoke checks locally. The generated T3 service sets it for its child processes.
+
+The optional `t3.relayUrl`, `t3.clerkPublishableKey`, and `t3.clerkCliOauthClientId` fields configure the GCP T3 service. They default to empty strings. Supply values for the relay you use. `t3.repoUrl` and `t3.branch` select the source checkout. The supplied T3 bootstrap and acceptance commands require the APIs described in the T3 design documents. Compatibility with upstream T3 is not confirmed.
+
+The scripts in `scripts/` use the Boat API key at `~/.config/cloudbox/boat-api-key`.
+`CLOUDBOX_HOSTS` is a space-separated list for `devbox-pick`, defaulting to `cloudbox-dev`.
+`CLOUDBOX_PROTECTED_HOSTS` lists hosts that `devbox-start` and `devbox-stop` must refuse, defaulting to none.
+`CLOUDBOX_RESUME_HOOK` optionally names a local shell script sent to the box after resume. No hook runs by default.

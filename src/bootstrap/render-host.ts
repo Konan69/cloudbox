@@ -1,7 +1,7 @@
 import { encodeIdleConfig } from "../box/idleConfig.ts";
 
 export interface HostBootstrapConfig {
-  readonly boxUser: "dev";
+  readonly boxUser: string;
   readonly name: string;
   readonly project: string;
   readonly zone: string;
@@ -448,6 +448,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/home/${config.boxUser}
+Environment=CLOUDBOX_BOX_USER=${config.boxUser}
 Environment=T3CODE_HOME=/home/${config.boxUser}/.t3
 Environment=T3_MACHINE_IDENTITY_MANIFEST=/home/${config.boxUser}/.config/cloudbox/machine-identity.json
 Environment=T3CODE_RELAY_URL=${config.t3.relayUrl}

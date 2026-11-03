@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Explicitly start (resume) a Boat devbox through the Boat API and wait until it is ready.
+# Usage: devbox-start cloudbox-dev|cloudbox-dev2|cloudbox-dev3 [default|large]
+# Resumes as default (4 vCPU, 8 GB, 1x billing) unless large (8 vCPU, 16 GB, 2x) is asked for:
+# a box doing light work used 4 GB at load 0.5 (2026-10-28); large is for the gate plus emulator.
+# This is the only way a box starts: ssh, tunnels and T3 SSH environments never wake one.
+# Every start bills until the box is stopped (devbox-stop) or its 6 h TTL ends.
+set -euo pipefail
+host=$1; want=${2:-default}
+[[ " ${CLOUDBOX_PROTECTED_HOSTS:-} " == *" $host "* ]] && { echo "$host is protected; refusing" >&2; exit 2; }
+key=$(cat ~/.config/cloudbox/boat-api-key); B=https://boat.dev/api/v1
+api() { curl -fsS -m 60 --retry 2 -H "Authorization: Bearer $key" -H "Content-Type: application/json" "$@"; }
+info() { api "$B/sandboxes?limit=100" | python3 -c "
+import sys,json
+s=next((s for s in json.load(sys.stdin)['sandboxes'] if s['name']=='$host'),None)
+print(f\"{s['id']} {s['state']} {s['type']} {s.get('ttlSeconds') or 21600}\" if s else '')"; }
+read -r id state type ttl <<<"$(info)"
+[ -n "${id:-}" ] || { echo "no sandbox named $host" >&2; exit 1; }
+case $state in
+  archiving) while [ "$(info | cut -d' ' -f2)" = archiving ]; do sleep 5; done; state=archived ;;
+esac
+if [ "$state" = archived ]; then
+  echo "starting $host as $want (was $type)" >&2
+  # A box whose disk outgrew the default type (type_too_small) resumes at its own type instead.
+  api -X POST -d "{\"type\":\"$want\",\"ttlSeconds\":$ttl}" "$B/sandboxes/$id/resume" >/dev/null 2>&1 || {
+    echo "$want refused (disk too large?); resuming as $type" >&2
+    api -X POST -d "{\"type\":\"$type\",\"ttlSeconds\":$ttl}" "$B/sandboxes/$id/resume" >/dev/null; }
+fi
+for _ in $(seq 60); do
+  st=$(info | cut -d' ' -f2)
+  case $st in ready|idle|running|busy)
+    echo "$host $st" >&2
+    # .boxignore drops every node_modules/ from snapshots, pnpm's own 12.4.2 tool included, so the
+    # gate's pnpm self-switch fails after a resume (29 Oct 2026). Reinstall it; harmless when intact.
+    if [[ -n "${CLOUDBOX_RESUME_HOOK:-}" ]]; then
+    for _t in 1 2 3 4 5 6; do
+      timeout 120 ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" 'bash -s' < "$CLOUDBOX_RESUME_HOOK" >&2 && break
+      sleep 10
+    done
+    fi
+    echo "$host"; exit 0;;
+  esac
+  sleep 5
+done
+echo "$host not ready after 5 min (state $st)" >&2; exit 1

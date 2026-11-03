@@ -91,9 +91,9 @@ const deploymentInputs = (config: AwsCloudboxConfig | GcpCloudboxConfig) =>
       t3: {
         repoUrl: config.t3.repoUrl,
         branch: config.t3.branch,
-        relayUrl: "https://relay.t3.codes",
-        clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
-        clerkCliOauthClientId: "hzxSgY2cH10sDU2r",
+        relayUrl: config.t3.relayUrl ?? "",
+        clerkPublishableKey: config.t3.clerkPublishableKey ?? "",
+        clerkCliOauthClientId: config.t3.clerkCliOauthClientId ?? "",
       },
     });
     const wakeBundle = yield* readInput("dist/wake-service.mjs", "pnpm build:wake");
@@ -427,6 +427,7 @@ const deployGcp = (
       networkTag,
       startupScript,
       sshPublicKey: sshPublicKey.trim(),
+      boxUser: config.boxUser,
       cloudboxName: config.name,
       assetDependencies: [
         bootstrapObject.objectName,

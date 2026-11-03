@@ -129,6 +129,22 @@ const localSettingsFixture = {
 };
 
 describe("T3 settings parity filtering", () => {
+  it("keeps a home-relative Codex shadow home and drops an absolute one", () => {
+    const filtered = filterPortableT3Settings({
+      providerInstances: {
+        codex_work: { driver: "codex", config: { shadowHomePath: "~/.codex_work" } },
+        codex_local: { driver: "codex", config: { shadowHomePath: "/home/local/.codex-work" } },
+        codex_escape: { driver: "codex", config: { shadowHomePath: "~/../other/.codex" } },
+      },
+    });
+
+    expect(filtered.providerInstances).toEqual({
+      codex_work: { driver: "codex", config: { shadowHomePath: "~/.codex_work" } },
+      codex_local: { driver: "codex", config: {} },
+      codex_escape: { driver: "codex", config: {} },
+    });
+  });
+
   it("keeps the explicit portable allow-list and removes paths and secrets", () => {
     const filtered = filterPortableT3Settings(localSettingsFixture);
 

@@ -8,7 +8,7 @@ import { chown } from "node:fs";
 
 const GOLDEN_ALIAS = "golden";
 const ARCHIVE_DIRECTORY = "/tank/archive";
-const MACHINE_USER = "dev";
+const MACHINE_USER = process.env.CLOUDBOX_BOX_USER ?? "dev";
 
 export const MachineName = Schema.NonEmptyString.pipe(
   Schema.check(

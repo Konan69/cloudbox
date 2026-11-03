@@ -1,6 +1,6 @@
 {
   "provider": "gcp",
-  "name": "dev-acceptance",
+  "name": "dev",
   "gcp": {
     "project": "your-gcp-project-id",
     "zone": "europe-west2-a",
@@ -11,31 +11,22 @@
     "credentials": "adc"
   },
   "wake": {
-    "allowedOrigins": ["https://your-t3-client.example.com"]
+    "allowedOrigins": [
+      "https://your-t3-client.example.com"
+    ]
   },
   "sshPublicKeyPath": "~/.ssh/id_ed25519.pub",
   "idleMinutes": 10,
   "t3": {
-    "repoUrl": "https://github.com/example/t3code.git",
+    "repoUrl": "https://github.com/pingdotgg/t3code.git",
     "branch": "main",
     "settingsParity": {
-      "enabled": true,
-      "keybindings": true
+      "enabled": false,
+      "keybindings": false
     }
   },
   "identity": {
-    "paths": [
-      "~/.claude/settings.json",
-      "~/.claude/CLAUDE.md",
-      "~/.claude/skills/",
-      "~/.agents/skills/",
-      "~/.claude/projects/-home-dev/memory/",
-      "~/.pi/agent/auth.json",
-      "~/.pi/agent/settings.json",
-      "~/.pi/agents/",
-      "~/.pi/agent/AGENTS.md",
-      "~/.config/gh/"
-    ],
+    "paths": [],
     "excludes": [
       "sessions/",
       "npm/",
@@ -47,12 +38,7 @@
     "maxTransferMb": 300
   },
   "bootstrap": {
-    "paths": [
-      "~/.agents/skills/",
-      "~/.config/gh/",
-      "~/.gitconfig",
-      "~/src/"
-    ],
+    "paths": [],
     "excludes": [
       "node_modules/",
       ".cache/"

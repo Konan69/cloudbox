@@ -4,11 +4,11 @@
 
 ## Decision
 
-For dev’s single-owner fork, implement **B: client-side, explicit one-shot wake intent backed by a small authenticated GCP wake service**.
+For the owner’s single-owner fork, implement **B: client-side, explicit one-shot wake intent backed by a small authenticated GCP wake service**.
 
-Do **not** wake on every ordinary reconnect. T3 starts supervisors for all persisted targets and those supervisors retry forever with delays of 3, 4, 8, then 16 seconds capped (`packages/client-runtime/src/connection/registry.ts:247-262`, `packages/client-runtime/src/connection/registry.ts:351-354`, `packages/client-runtime/src/connection/supervisor.ts:32-33`, `packages/client-runtime/src/connection/supervisor.ts:732-751`). If every retry resumed the VM, dev’s idle suspension would immediately cause a reconnect, which would resume it again. The safe trigger is a **one-shot user intent** armed when the user selects/opens that environment or foregrounds the app while it is selected. Background retries may connect after the wake, but may not initiate another wake.
+Do **not** wake on every ordinary reconnect. T3 starts supervisors for all persisted targets and those supervisors retry forever with delays of 3, 4, 8, then 16 seconds capped (`packages/client-runtime/src/connection/registry.ts:247-262`, `packages/client-runtime/src/connection/registry.ts:351-354`, `packages/client-runtime/src/connection/supervisor.ts:32-33`, `packages/client-runtime/src/connection/supervisor.ts:732-751`). If every retry resumed the VM, the owner’s idle suspension would immediately cause a reconnect, which would resume it again. The safe trigger is a **one-shot user intent** armed when the user selects/opens that environment or foregrounds the app while it is selected. Background retries may connect after the wake, but may not initiate another wake.
 
-Design A is the best upstream product architecture, because it keeps wake credentials and rate limits in the authenticated relay. It is not the best first deployment for dev: `relay.t3.codes` would need to ship the feature, or dev would have to operate a full relay stack. Design C avoids T3 changes but either wakes for unauthenticated traffic or becomes a second authenticated proxy in the application data path.
+Design A is the best upstream product architecture, because it keeps wake credentials and rate limits in the authenticated relay. It is not the best first deployment for the owner: `relay.t3.codes` would need to ship the feature, or the owner would have to operate a full relay stack. Design C avoids T3 changes but either wakes for unauthenticated traffic or becomes a second authenticated proxy in the application data path.
 
 ## Service API
 
@@ -126,10 +126,10 @@ Registration immediately creates a supervisor and calls `supervisor.connect`; ap
 
 ## 2. Candidate designs
 
-| Design | T3 relay change | dev fork change | External service | Main advantage | Main problem |
+| Design | T3 relay change | the owner fork change | External service | Main advantage | Main problem |
 |---|---:|---:|---:|---|---|
 | **A. Relay wake hook** | Yes | Small client intent change | GCP wake webhook | Best centralized auth, secrets, coalescing | Requires upstream deploy or self-hosted relay |
-| **B. Client wake** | No | Yes | GCP wake endpoint | Smallest deployable scope for dev | Fork owns metadata/auth and intent semantics |
+| **B. Client wake** | No | Yes | GCP wake endpoint | Smallest deployable scope for the owner | Fork owns metadata/auth and intent semantics |
 | **C. Doorbell proxy** | No | None or small auth header change | Always-on Worker proxy + GCP wake | Independent of T3 release cycle | Becomes data-plane proxy; hard to authenticate before host wakes |
 
 ### A. Relay-side wake hook
@@ -174,7 +174,7 @@ Thirty-five seconds covers the observed ~14-second GCE resume plus cloudflared/T
 
 The route already authenticates a DPoP-bound client and resolves the link by that authenticated `userId` (`infra/relay/src/http/Api.ts:763-773`, `infra/relay/src/environments/EnvironmentLinks.ts:344-363`). The hook should be keyed by the same `(userId, environmentId)` and accepted only when included in an environment-signed link proof. Thus an arbitrary client cannot attach a webhook to someone else’s environment.
 
-This design must be deployed by T3 to `relay.t3.codes`. A fork cannot add a server-side feature to the hosted relay. Until an upstream PR lands, dev must point server, web/desktop, and mobile builds at a self-hosted relay; relay URL selection is already configurable through `T3CODE_RELAY_URL`/build config (`apps/server/src/cloud/publicConfig.ts:48-101`, `apps/mobile/app.config.ts:348`, `apps/web/src/cloud/publicConfig.ts:46-47`).
+This design must be deployed by T3 to `relay.t3.codes`. A fork cannot add a server-side feature to the hosted relay. Until an upstream PR lands, the owner must point server, web/desktop, and mobile builds at a self-hosted relay; relay URL selection is already configurable through `T3CODE_RELAY_URL`/build config (`apps/server/src/cloud/publicConfig.ts:48-101`, `apps/mobile/app.config.ts:348`, `apps/web/src/cloud/publicConfig.ts:46-47`).
 
 #### Assessment
 
@@ -182,9 +182,9 @@ This design must be deployed by T3 to `relay.t3.codes`. A fork cannot add a serv
 - **Product fit:** strongest upstream design.
 - **Implementation:** about **1,200–1,800 changed LOC including tests/migration**, 5–7 commits.
 - **Risk:** medium-high, mostly timeout behavior, SSRF defense, encrypted secret lifecycle, and retry coalescing.
-- **dev fit now:** poor unless self-hosting is already desired.
+- **the owner fit now:** poor unless self-hosting is already desired.
 
-### B. Client-side wake in dev’s fork
+### B. Client-side wake in the owner’s fork
 
 #### Shape
 
@@ -198,12 +198,12 @@ type WakePolicy = {
 };
 ```
 
-The wake endpoint is not obtained from `relay.t3.codes`; it is local fork configuration attached to dev’s environment. No GCP credential or static wake secret is stored in the app. The app uses its existing Clerk token plus its existing device DPoP key to authenticate a wake request. `ManagedRelayDpopSigner` already exposes a device key thumbprint and proof creation with an optional access token hash (`packages/client-runtime/src/relay/managedRelay.ts:48-52`, `packages/client-runtime/src/relay/managedRelay.ts:212-220`).
+The wake endpoint is not obtained from `relay.t3.codes`; it is local fork configuration attached to the owner’s environment. No GCP credential or static wake secret is stored in the app. The app uses its existing Clerk token plus its existing device DPoP key to authenticate a wake request. `ManagedRelayDpopSigner` already exposes a device key thumbprint and proof creation with an optional access token hash (`packages/client-runtime/src/relay/managedRelay.ts:48-52`, `packages/client-runtime/src/relay/managedRelay.ts:212-220`).
 
 Add a one-shot `WakeIntentStore`:
 
 ```text
-user selects/opens dev env
+user selects/opens the owner env
   → arm WakeIntentStore[environmentId]
   → retryNow(environmentId)
   → resolver consumes intent exactly once
@@ -222,8 +222,8 @@ The first normal relay connect may still fail while the VM resumes. Existing ret
 4. New `packages/client-runtime/src/connection/wakeEndpoint.ts`: Clerk + DPoP authenticated POST, 5-second timeout, no retries inside this client.
 5. `packages/client-runtime/src/connection/resolver.ts:141-184`: consume the one-shot intent before the existing relay bootstrap call.
 6. `packages/client-runtime/src/connection/registry.ts:625-629`: pair `armWake` with existing `retryNow` so selection interrupts backoff.
-7. Desktop/web surface: arm on selecting/opening the active dev environment; registration currently occurs in `apps/web/src/components/cloud/CloudEnvironmentConnectList.tsx:72-97`.
-8. Mobile surface: arm on selection/foreground for the selected dev environment; connection commands are centralized at `apps/mobile/src/features/connection/useConnectionController.ts:39-85`.
+7. Desktop/web surface: arm on selecting/opening the active the owner environment; registration currently occurs in `apps/web/src/components/cloud/CloudEnvironmentConnectList.tsx:72-97`.
+8. Mobile surface: arm on selection/foreground for the selected the owner environment; connection commands are centralized at `apps/mobile/src/features/connection/useConnectionController.ts:39-85`.
 
 #### Assessment
 
@@ -231,7 +231,7 @@ The first normal relay connect may still fail while the VM resumes. Existing ret
 - **Product fit:** private/fork feature, not general relay behavior.
 - **Implementation:** about **580–920 changed LOC including tests and GCP service**, four commits.
 - **Risk:** medium. The key risk is accidentally arming wake from background auto-connect rather than explicit user intent.
-- **dev fit now:** best. No relay fork or self-hosting.
+- **the owner fit now:** best. No relay fork or self-hosting.
 
 ### C. Always-on doorbell proxy
 
@@ -260,7 +260,7 @@ This should be a direct bearer environment, not a hosted-relay target. Relay con
 - **Architecture:** violates the current “relay is not in the hot path” property (`infra/relay/README.md:10-12`).
 - **Implementation:** about **200–450 external LOC**, plus Cloudflare routing and WebSocket tests.
 - **Risk:** medium-high: proxy correctness, recursive fetch/routing, long-lived WebSockets, and unauthenticated wake abuse.
-- **dev fit:** acceptable only if the doorbell already has an authenticated client protocol; otherwise reject.
+- **the owner fit:** acceptable only if the doorbell already has an authenticated client protocol; otherwise reject.
 
 ---
 
@@ -298,7 +298,7 @@ WHERE user_id = ? AND environment_id = ?
 
 Concurrent connect attempts then share one wake. Store only an encrypted webhook secret. Permit HTTPS, reject redirects, block loopback/private/link-local destinations, cap response bytes, and use a 3-second webhook timeout. These controls are required because an owner-configurable URL otherwise turns the Worker into an SSRF primitive.
 
-For B, enforce an endpoint-side per-owner minimum wake interval, preferably at an edge/Firestore rate limiter if the service may scale beyond one instance. For dev’s low-volume deployment, fresh DPoP + `requestId` + the host grace window are the minimum safe baseline.
+For B, enforce an endpoint-side per-owner minimum wake interval, preferably at an edge/Firestore rate limiter if the service may scale beyond one instance. For the owner’s low-volume deployment, fresh DPoP + `requestId` + the host grace window are the minimum safe baseline.
 
 ### 3.3 Accidental-wake cost
 
@@ -312,7 +312,7 @@ The expensive event is not the HTTP function call; it is resuming the GCE VM and
 
 ### 3.4 Idle timer coordination
 
-dev’s VM-side idle controller must maintain `notBeforeSuspend`.
+the owner’s VM-side idle controller must maintain `notBeforeSuspend`.
 
 Set it to at least **resume detected + 120 seconds** and refresh it on the first authenticated T3 HTTP/WebSocket activity. A Linux service can detect resume using a system sleep hook or a wall-clock/boot-time discontinuity. The controller must not suspend while T3/cloudflared is still reconnecting.
 
@@ -328,7 +328,7 @@ Most importantly, only a fresh one-shot client intent can call wake. Once the gr
 
 ## 4. Self-hosting the relay for design A
 
-A fork cannot alter `relay.t3.codes`. Running A before upstream adoption means deploying `infra/relay` and pointing all dev builds and the host at it.
+A fork cannot alter `relay.t3.codes`. Running A before upstream adoption means deploying `infra/relay` and pointing all the owner builds and the host at it.
 
 The unmodified Alchemy stack includes:
 
@@ -367,7 +367,7 @@ The repository’s `replicas: 2`, queues, observability, Clerk, and APNs make th
 - Add optional `WakePolicy` to `RelayConnectionTarget`.
 - Add a catalog document v2 decoder/migration; never place a static wake secret in the target.
 - Add serialization tests for old v1 documents and the new optional policy.
-- Configure only dev’s environment as sleepable in the fork.
+- Configure only the owner’s environment as sleepable in the fork.
 
 ### Commit 2 — `feat(client-runtime): add one-shot wake intent`
 
@@ -387,11 +387,11 @@ The repository’s `replicas: 2`, queues, observability, Clerk, and APNs make th
 - In the relay resolver, call it only after consuming a wake intent, then continue the existing `connectEnvironment` path (`packages/client-runtime/src/connection/resolver.ts:141-184`).
 - Do not wait 14 seconds in this request; let existing connection backoff observe tunnel recovery.
 
-### Commit 4 — `feat(desktop-mobile): wake the selected dev environment`
+### Commit 4 — `feat(desktop-mobile): wake the selected the owner environment`
 
 **Scope:** 80–160 LOC including tests. **Risk:** low-medium.
 
-- Desktop/web: call `wakeAndRetry` when the user opens/selects the dev environment or foregrounds the app with it selected.
+- Desktop/web: call `wakeAndRetry` when the user opens/selects the the owner environment or foregrounds the app with it selected.
 - Mobile: do the same through `useConnectionController`.
 - Do not arm from cloud environment discovery/status refresh.
 - Suppress duplicate intent while the selected environment is already connecting or connected.
@@ -568,6 +568,6 @@ The runtime service account needs no downloadable key. Cloud Run’s metadata se
 5. Relay-side A is the strongest upstream design, but it needs a relay deploy plus client wake-intent signaling.
 6. Using A now means self-hosting the Alchemy/PlanetScale/Hyperdrive/Cloudflare/Clerk stack, roughly 6–10 setup days and $55+/month baseline.
 7. Doorbell C avoids T3 changes but cannot securely authorize the first wake without becoming a second client-auth protocol and data-plane proxy.
-8. Recommend B for dev: local sleep metadata, a one-shot explicit wake intent, and an authenticated GCP resume endpoint.
+8. Recommend B for the owner: local sleep metadata, a one-shot explicit wake intent, and an authenticated GCP resume endpoint.
 9. Validate Clerk owner `sub` plus fresh DPoP, use the DPoP `jti` as Compute `requestId`, and grant only `compute.instances.resume` on the exact VM.
 10. Give the VM a 120-second post-resume grace; background retries must never create another wake after that one-shot intent is consumed.

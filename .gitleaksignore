@@ -1,0 +1,30 @@
+# Public Clerk publishable key, not a secret.
+20f199aba81a00d1ffc926ad6ccf7136f2a2d039:src/boat/bootstrap.ts:generic-api-key:90
+# Public OAuth client ID, not a client secret.
+20f199aba81a00d1ffc926ad6ccf7136f2a2d039:src/boat/bootstrap.ts:generic-api-key:91
+# Public Clerk publishable key, not a secret.
+86c047c845659b729c029ba4a443c3536f5637c7:alchemy.run.ts:generic-api-key:94
+# Public OAuth client ID, not a client secret.
+86c047c845659b729c029ba4a443c3536f5637c7:alchemy.run.ts:generic-api-key:95
+# Public Clerk publishable key, not a secret.
+8b4e67f7656cd5a10199a16bb0aef0b15e4a5299:src/bootstrap/render-host.test.ts:generic-api-key:15
+# Public OAuth client ID, not a client secret.
+8b4e67f7656cd5a10199a16bb0aef0b15e4a5299:src/bootstrap/render-host.test.ts:generic-api-key:16
+# Public Clerk publishable key, not a secret.
+6694d72833c72588ffddbd9ec189307fabf13e59:alchemy.run.ts:generic-api-key:67
+# Public OAuth client ID, not a client secret.
+6694d72833c72588ffddbd9ec189307fabf13e59:alchemy.run.ts:generic-api-key:68
+# Google API enum KEY_ALG_RSA_2048, not key material.
+4425bc7483f218e7b1e1586fbcf8705923464933:src/gcp/iam.ts:generic-api-key:402
+# Public Clerk publishable key, not a secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:164
+# Public OAuth client ID, not a client secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:165
+# Public Clerk publishable key, not a secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:330
+# Public OAuth client ID, not a client secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:331
+# Public Clerk publishable key, not a secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:735
+# Public OAuth client ID, not a client secret.
+2afbf7bd23952486a0dcaae3894f9aa50dceef9f:docs/t3-headless.md:generic-api-key:736

@@ -76,6 +76,9 @@ const filterBackgroundActivity = (value: unknown): JsonObject | undefined => {
   return filtered;
 };
 
+const isHomeRelativePath = (value: unknown): value is string =>
+  typeof value === "string" && value.startsWith("~/") && !value.split("/").includes("..");
+
 const providerConfigFields = (driver: string): ReadonlyArray<string> | undefined => {
   switch (driver) {
     case "codex": return PROVIDER_CONFIG_FIELDS.codex;
@@ -93,7 +96,13 @@ const filterProviderConfig = (
   value: unknown,
 ): JsonObject | undefined => {
   const fields = providerConfigFields(driver);
-  return fields === undefined || !isObject(value) ? undefined : pick(value, fields);
+  if (fields === undefined || !isObject(value)) return undefined;
+  const filtered = pick(value, fields);
+  // A home-relative shadow home names the same account on every machine; absolute paths stay local.
+  if (driver === "codex" && isHomeRelativePath(value.shadowHomePath)) {
+    filtered.shadowHomePath = value.shadowHomePath;
+  }
+  return filtered;
 };
 
 const filterProviders = (value: unknown): JsonObject | undefined => {

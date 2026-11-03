@@ -220,7 +220,7 @@ for tool in node vp claude codex pi opencode; do
     printf '%s=%s\\n' "$tool" "$version"
   fi
 done
-pnpm_version="$(cd /home/dev/t3code && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version)"
+pnpm_version="$(cd $HOME/t3code && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version)"
 if [[ "$pnpm_version" != 11.* ]]; then failed=1; fi
 printf 'pnpm=%s\\n' "$pnpm_version"
 exit "$failed"`,
@@ -302,7 +302,7 @@ cleanup() {
 }
 trap cleanup EXIT
 if incus info "$container" </dev/null >/dev/null 2>&1; then incus delete --force "$container" </dev/null; fi
-box_user=dev
+box_user="$(id -un)"
 host_uid="$(id -u "$box_user")"
 host_gid="$(id -g "$box_user")"
 host_directory="$(sudo -u "$box_user" mktemp -d /tmp/cloudbox-golden-identity.XXXXXX)"
@@ -327,11 +327,11 @@ const t3Check = (target: SshTransport) =>
     "t3 server",
     `environment="$(curl --fail --silent --show-error http://127.0.0.1:3773/.well-known/t3/environment)"
 printf '%s' "$environment" | jq -e 'type == "object"' >/dev/null
-token="$(cat /home/dev/.t3/idle-detector.token)"
+token="$(cat $HOME/.t3/idle-detector.token)"
 test -n "$token"
 clients="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" http://127.0.0.1:3773/api/auth/clients)"
 printf '%s' "$clients" | jq -e 'type == "array"' >/dev/null
-box_uid="$(id -u dev)"
+box_uid="$(id -u)"
 service_state="$(XDG_RUNTIME_DIR="/run/user/$box_uid" systemctl --user is-active t3code-fork.service)"
 test "$service_state" = active
 printf 'environment=json clients=%s service=%s\\n' "$(printf '%s' "$clients" | jq 'length')" "$service_state"`,

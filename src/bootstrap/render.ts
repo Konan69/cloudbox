@@ -134,6 +134,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=/home/${config.boxUser}
+Environment=CLOUDBOX_BOX_USER=${config.boxUser}
 Environment=T3CODE_HOME=/home/${config.boxUser}/.t3
 Environment=PATH=/home/${config.boxUser}/.vite-plus/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/${config.boxUser}/t3code/.env.example

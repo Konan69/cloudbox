@@ -71,6 +71,12 @@ The Node executable, WSL distro, checkout path, and name are captured from the `
 
 Boat resumes onto a new machine with a new IP and new SSH host keys. The managed entry therefore does not retain host keys. The API-authenticated proxy resolves the current IP each time; disabling host-key persistence is a deliberate consequence of Boat's documented machine-identity model.
 
+## Independent sandboxes
+
+Each config manages one sandbox named `cloudbox-<name>`. Use a separate working directory and config for each sandbox.
+
+`identity.paths` selects the files copied by rsync. The examples copy no identity files and disable settings parity. Enable these explicitly for your account.
+
 ## Resume-on-connect proxy
 
 Windows OpenSSH invokes:
@@ -121,6 +127,8 @@ The safe read-only account check is:
 ```
 
 At implementation time it reported `canStart: false`, `checkoutRequired: true`, and `startBlockedReason: subscription_required`.
+
+The trial 2-hour TTL is renewable: `PATCH /sandboxes/:id {"ttlSeconds":7200}` restarts the clock (verified 2026-10-04). `~/bin/boat-keepalive`, run every 20 minutes by the `boat-keepalive.timer` systemd user unit on the PC, renews it for any box with a live `boat proxy` tunnel. Without it the box is archived every 2 hours even mid-work, which kills running agents and their background commands.
 
 ## User action still required
 

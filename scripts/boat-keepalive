@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Renew the Boat trial TTL (6h) for each box that has a live `boat proxy` tunnel,
+# so a box in use is never archived mid-work. No tunnel = no renewal, and the box stops on its own.
+set -euo pipefail
+key=$(cat ~/.config/cloudbox/boat-api-key)
+# Proxies under a cliproxy reverse tunnel (ssh -R ...:8317) are background plumbing, not use; skip them.
+names=$(for pid in $(pgrep -f "cli.mjs boat proxy"); do
+  ppid=$(ps -o ppid= -p "$pid" | tr -d ' '); pcmd=$(ps -o cmd= -p "$ppid" 2>/dev/null)
+  case "$pcmd" in *"-R 127.0.0.1:8317"*) continue;; esac
+  ps -o cmd= -p "$pid" | grep -oE "boat proxy [a-z0-9-]+" | awk '{print $3}'
+done | sort -u)
+for name in $names; do
+  id=$(curl -fsS -m 30 --retry 2 -H "Authorization: Bearer $key" https://boat.dev/api/v1/sandboxes \
+    | python3 -c "import sys,json; print(next((s['id'] for s in json.load(sys.stdin).get('sandboxes',[]) if s['name']=='cloudbox-$name' and s['state'] in ('idle','ready','running','busy')),''))")
+  [ -n "$id" ] || { echo "$name: not running, skipped"; continue; }
+  curl -fsS -m 30 -X PATCH -H "Authorization: Bearer $key" -H "Content-Type: application/json" \
+    -d '{"ttlSeconds":21600}' "https://boat.dev/api/v1/sandboxes/$id" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('$name', d.get('sandbox',d).get('archiveAfter'))"
+done

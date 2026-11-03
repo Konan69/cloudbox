@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Stop (archive) a Boat devbox through the Boat API. Usage: devbox-stop cloudbox-devN
+set -euo pipefail
+host=$1
+[[ " ${CLOUDBOX_PROTECTED_HOSTS:-} " == *" $host "* ]] && { echo "$host is protected; refusing" >&2; exit 2; }
+key=$(cat ~/.config/cloudbox/boat-api-key); B=https://boat.dev/api/v1
+id=$(curl -fsS -m 30 -H "Authorization: Bearer $key" "$B/sandboxes?limit=100" | python3 -c "
+import sys,json; print(next((s['id'] for s in json.load(sys.stdin)['sandboxes'] if s['name']=='$host' and s['state'] not in ('archived','archiving')),''))")
+[ -n "$id" ] || { echo "$host already stopped" >&2; exit 0; }
+curl -fsS -m 60 -X POST -H "Authorization: Bearer $key" -H "Content-Type: application/json" -d '{}' "$B/sandboxes/$id/stop" >/dev/null
+echo "$host stopping" >&2

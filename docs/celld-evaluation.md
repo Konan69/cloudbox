@@ -34,7 +34,7 @@ deployment adoption, EKS pod identity)**.
 
 celld is validated as real and well-built, and **not used** in cloudbox. Revisit if any of these
 becomes true: celld adds process/container execution (would compete with incus for machines);
-celld adds TCP sockets or a Hyperdrive equivalent *and* dev decides to self-host the relay with
+celld adds TCP sockets or a Hyperdrive equivalent *and* the owner decides to self-host the relay with
 his own ingress instead of Cloudflare tunnels; or the agent-fleet product needs per-agent durable
 objects (then celld on the always-on side, not on the sleeping host).
 

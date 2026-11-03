@@ -147,6 +147,7 @@ export interface GcpInstanceProps {
   readonly networkTag: string;
   readonly startupScript: string;
   readonly sshPublicKey: string;
+  readonly boxUser?: string;
   readonly cloudboxName: string;
   readonly assetDependencies: ReadonlyArray<string>;
 }
@@ -393,7 +394,7 @@ export const GcpDiskProvider = (api: GcpApi) =>
 
 const desiredMetadata = (props: GcpInstanceProps) => [
   { key: "startup-script", value: props.startupScript },
-  { key: "ssh-keys", value: `dev:${props.sshPublicKey.trim()}` },
+  { key: "ssh-keys", value: `${props.boxUser ?? "dev"}:${props.sshPublicKey.trim()}` },
 ];
 
 export const GcpInstanceProvider = (api: GcpApi) =>

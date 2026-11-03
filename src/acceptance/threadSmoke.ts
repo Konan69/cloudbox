@@ -12,19 +12,20 @@ import {
   type SshTransport,
 } from "../ssh/transport.ts";
 
-const SMOKE_REPOSITORY = "/home/dev/smoke-repo";
+const BOX_HOME = `/home/${process.env.CLOUDBOX_BOX_USER ?? "dev"}`;
+const SMOKE_REPOSITORY = `${BOX_HOME}/smoke-repo`;
 const T3_PORT = 3773;
 const SMOKE_PROMPT = "Reply with exactly: CLOUDBOX_SMOKE_OK and the output of uname -r";
 const MACHINE_SMOKE_PROMPT = `Run these commands inside your execution environment:
 hostname
 cat /etc/hostname
-ls /home/dev/ws
+ls ${BOX_HOME}/ws
 
 Reply with exactly these four lines, replacing values with the command output:
 CLOUDBOX_MACHINE_SMOKE_OK
 hostname=<hostname output>
 etc_hostname=</etc/hostname output>
-workspace=<space-separated /home/dev/ws entries>`;
+workspace=<space-separated ${BOX_HOME}/ws entries>`;
 const KERNEL_RELEASE_PATTERN = /\b\d+\.\d+\.\d+(?:[-.][0-9A-Za-z_+]+)+\b/;
 const MACHINE_NAME_PREFIX = "thread-";
 const MACHINE_NAME_MAX_LENGTH = 63;
@@ -292,7 +293,7 @@ const machineAssertions = (
       name: "machine binding",
       pass: binding?.machineName === expectedName &&
         binding.hostWorkspaceRoot === `/tank/threads/${threadId}/ws` &&
-        binding.guestWorkspaceRoot === "/home/dev/ws",
+        binding.guestWorkspaceRoot === `${BOX_HOME}/ws`,
       evidence: binding === null
         ? "T3 thread snapshot had no machine binding."
         : `${binding.machineName} state=${binding.state} host=${binding.hostWorkspaceRoot} guest=${binding.guestWorkspaceRoot}`,
@@ -722,7 +723,7 @@ if [ ! -d "$repo/.git" ]; then
   git -C "$repo" add README.md
   git -C "$repo" -c user.name='Cloudbox Smoke' -c user.email='cloudbox-smoke@localhost' commit -m 'chore: initialize smoke repository'
 fi
-cat /home/dev/.t3/idle-detector.token
+cat "$HOME/.t3/idle-detector.token"
 `;
   const output = await runCaptured(
     "ssh",

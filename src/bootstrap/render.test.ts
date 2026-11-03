@@ -15,7 +15,7 @@ const config = Schema.decodeUnknownSync(AwsCloudboxConfig)({
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {
-    repoUrl: "https://github.com/example/t3code.git",
+    repoUrl: "https://github.com/pingdotgg/t3code.git",
     branch: "main",
     settingsParity: { enabled: true, keybindings: true },
   },
@@ -91,7 +91,7 @@ describe("renderBootstrap", () => {
       idleBundle: "idle-bundle",
     });
 
-    expect(script).toContain("https://github.com/example/t3code.git");
+    expect(script).toContain("https://github.com/pingdotgg/t3code.git");
     expect(script).not.toContain("GIT_ASKPASS");
     expect(script).not.toContain("CLOUDBOX_CLONE_TOKEN");
     expect(script).not.toContain("ssh-ed25519 AAAATEST laptop");

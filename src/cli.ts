@@ -1340,18 +1340,26 @@ const readBoatPublicKey = (config: BoatCloudboxConfig) =>
   });
 
 /**
- * Where SSH for a Boat sandbox actually listens. Boat puts every sandbox behind
- * a shared IPv4 host with a per-sandbox port (`sshEndpoint`, "host:port"); the
- * sandbox's `ip` field is an IPv6 address that is not reachable from WSL2. The
- * endpoint changes on every resume, so it is read fresh for each connection and
- * a missing or malformed value is an error rather than a fallback to `ip`.
+ * Where SSH for a Boat sandbox actually listens. Boat puts `small` and `default`
+ * sandboxes behind a shared IPv4 host with a per-sandbox port (`sshEndpoint`,
+ * "host:port"); their `ip` field is an IPv6 address that is not reachable from
+ * WSL2. A `large` sandbox gets a public IPv4 of its own and no `sshEndpoint`
+ * (seen 2026-10-05), so an IPv4 `ip` is used on port 22. The address changes on
+ * every resume, so it is read fresh for each connection, and when neither form
+ * is present that is an error.
  */
-const boatSshEndpoint = (sandbox: { readonly id: string; readonly sshEndpoint?: string | null }) =>
+const boatSshEndpoint = (sandbox: {
+  readonly id: string;
+  readonly sshEndpoint?: string | null;
+  readonly ip?: string | null;
+}) =>
   Effect.gen(function* () {
     const match = /^(?<host>[^:\s]+):(?<port>\d{1,5})$/u.exec(sandbox.sshEndpoint?.trim() ?? "");
     const host = match?.groups?.["host"];
     const port = Number(match?.groups?.["port"]);
     if (host === undefined || !Number.isInteger(port) || port < 1 || port > 65_535) {
+      const ip = sandbox.ip?.trim() ?? "";
+      if (/^(?:\d{1,3}\.){3}\d{1,3}$/u.test(ip)) return { host: ip, port: 22 };
       return yield* Effect.fail(
         cliError(
           "Boat SSH address",

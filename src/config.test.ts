@@ -13,7 +13,7 @@ const valid = {
   sshPublicKeyPath: "~/.ssh/id_ed25519.pub",
   idleMinutes: 30,
   t3: {
-    repoUrl: "https://github.com/example/t3code.git",
+    repoUrl: "https://github.com/pingdotgg/t3code.git",
     branch: "main",
     settingsParity: { enabled: true, keybindings: true },
   },
@@ -73,6 +73,21 @@ const validBoat = {
 };
 
 describe("CloudboxConfig", () => {
+  it("accepts a configured Linux account and optional relay settings", async () => {
+    const t3 = {
+      ...valid.t3,
+      relayUrl: "https://relay.example.com",
+      clerkPublishableKey: "example-publishable-key",
+      clerkCliOauthClientId: "example-client-id",
+    };
+    const config = await Effect.runPromise(parseConfig(
+      "cloudbox.json",
+      JSON.stringify({ ...valid, boxUser: "coder", t3 }),
+    ));
+    expect(config.boxUser).toBe("coder");
+    expect(config.t3).toEqual(t3);
+  });
+
   it.effect("decodes a complete config", () =>
     Effect.gen(function* () {
       const config = yield* parseConfig("cloudbox.json", JSON.stringify(valid));
@@ -137,7 +152,7 @@ describe("CloudboxConfig", () => {
           ...validBoat,
           t3: {
             ...validBoat.t3,
-            repoUrl: "https://github.com/example/t3code.git",
+            repoUrl: "https://github.com/pingdotgg/t3code.git",
             branch: "main",
           },
         }),

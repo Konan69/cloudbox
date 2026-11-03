@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Exit 0 only if Boat box cloudbox-<name> is already running. Never resumes it.
+# Used by the cliproxy tunnels so a tunnel reconnect cannot wake an archived box.
+set -uo pipefail
+name=$1
+key=$(cat ~/.config/cloudbox/boat-api-key)
+curl -fsS -m 20 -H "Authorization: Bearer $key" "https://boat.dev/api/v1/sandboxes?limit=100" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(s['name']=='cloudbox-$name' and s['state'] in ('ready','idle','running','busy') for s in d.get('sandboxes',[])) else 1)"
