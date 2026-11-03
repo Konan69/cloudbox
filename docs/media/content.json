@@ -1,0 +1,105 @@
+{
+  "repo": "cloudbox",
+  "accent": "#8AB4FF",
+  "hero": {
+    "command": "pnpm -s cloudbox --help",
+    "output": [
+      {
+        "text": "Control and verify one personal Cloudbox machine on AWS, GCP, or Boat.",
+        "style": "muted"
+      },
+      {
+        "text": "SUBCOMMANDS",
+        "style": "muted"
+      },
+      {
+        "text": "  boat               Provision and operate the Boat provider lane."
+      },
+      {
+        "text": "  status             Show the box state, access path, and wake-service view."
+      },
+      {
+        "text": "  wake               Start or resume the box, wait for SSH, then print its host.",
+        "style": "accent"
+      },
+      {
+        "text": "  sleep              Hibernate or suspend the box through its provider.",
+        "style": "accent"
+      },
+      {
+        "text": "  ssh                Open an interactive SSH session to the running box."
+      },
+      {
+        "text": "  verify             Run the end-to-end host acceptance suite over SSH."
+      },
+      {
+        "text": "  verify-sleep       Hibernate or suspend, wake, and prove memory survived."
+      },
+      {
+        "text": "  verify-idle        Leave the host untouched and verify automatic idle sleep."
+      }
+    ],
+    "value": "One dev box in your own cloud account that sleeps when idle."
+  },
+  "diagram": {
+    "direction": "TB",
+    "nodes": [
+      {
+        "id": "cli",
+        "label": "cloudbox CLI",
+        "sublabel": "wake, sleep, ssh, sync"
+      },
+      {
+        "id": "wake",
+        "label": "wake-service",
+        "sublabel": "Cloud Run, GCP only"
+      },
+      {
+        "id": "api",
+        "label": "Provider API",
+        "sublabel": "EC2, GCE, Boat"
+      },
+      {
+        "id": "box",
+        "label": "Box",
+        "sublabel": "Ubuntu 24.04 + T3"
+      },
+      {
+        "id": "idle",
+        "label": "cloudbox-idle",
+        "sublabel": "timer, every 5 min"
+      }
+    ],
+    "edges": [
+      {
+        "from": "cli",
+        "to": "api"
+      },
+      {
+        "from": "wake",
+        "to": "api"
+      },
+      {
+        "from": "api",
+        "to": "box",
+        "label": "start"
+      },
+      {
+        "from": "box",
+        "to": "idle",
+        "label": "busy?"
+      },
+      {
+        "from": "idle",
+        "to": "api",
+        "label": "suspend"
+      }
+    ],
+    "primary": [
+      "cli",
+      "api",
+      "box",
+      "idle"
+    ]
+  }
+}
