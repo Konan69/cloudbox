@@ -1,5 +1,7 @@
 # cloudbox
 
+*A computer that sleeps in the cloud and wakes when you call its name.*
+
 `cloudbox` is a command-line tool that creates, wakes, sleeps and checks one personal development machine in your own AWS, Google Cloud or Boat account.
 
 ![Terminal running pnpm -s cloudbox --help and listing the boat, status, wake, sleep, ssh, verify, verify-sleep and verify-idle subcommands](docs/media/hero.gif)
