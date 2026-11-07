@@ -1,6 +1,6 @@
 # cloudbox
 
-*A computer that sleeps in the cloud and wakes when you call its name.*
+One dev box in your own cloud account, asleep whenever you are not using it.
 
 `cloudbox` is a command-line tool that creates, wakes, sleeps and checks one personal development machine in your own AWS, Google Cloud or Boat account.
 
