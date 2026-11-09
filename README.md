@@ -4,7 +4,7 @@ One dev box in your own cloud account, asleep whenever you are not using it.
 
 A big machine for coding agents costs money every hour it runs, and most hours nobody is using it. `cloudbox` keeps one box per config file on AWS, Google Cloud or Boat. On AWS and GCP a timer on the box checks every 5 minutes for agent processes, T3 sessions or a keep-awake marker, and hibernates it through the provider API when there are none. `cloudbox wake` brings it back with memory intact and waits for SSH. The same config syncs your identity files and repos and runs an acceptance suite, so a rebuilt box comes up the same as the old one.
 
-![Terminal running pnpm -s cloudbox --help and listing the boat, status, wake, sleep, ssh, verify, verify-sleep and verify-idle subcommands](docs/media/hero.gif)
+![Explainer: an agent exits, cloudbox-idle.timer logs 0 to 30 idle minutes, the box calls StopInstances Hibernate=true and its RAM goes to the root volume, then cloudbox wake restores it and an agent starts again](docs/media/hero.gif)
 
 ## Install
 
